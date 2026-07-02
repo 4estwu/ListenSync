@@ -1,0 +1,11 @@
+node_modules/
+dist/
+build/
+.env
+.env.*
+!.env.example
+*.p8
+*.log
+.DS_Store
+.vite/
+.claude/settings.local.json
