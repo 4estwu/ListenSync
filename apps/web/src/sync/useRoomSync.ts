@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { QueueItem, RelayEvent, RoomState, Track } from '@spotifyapple/shared'
 import { connectRoom, type RelayConnection } from '../relay/client'
-import type { PlaybackAdapter } from '../platform/adapter'
+import type { AdapterPlaybackState, PlaybackAdapter } from '../platform/adapter'
 import { resolveTrackUri } from './resolveTrack'
 
-const POLL_INTERVAL_MS = 1000
+const SLOW_POLL_MS = 3000 // steady-state mid-track — drift accumulates slowly, no need to check often
+const FAST_POLL_MS = 500 // near a track boundary — auto-advance timing and start-up need more precision
+const BOUNDARY_WINDOW_MS = 5000 // within this many ms of a track's start or end counts as "near a boundary"
 const DRIFT_THRESHOLD_MS = 1500
 const CORRECTION_COOLDOWN_MS = 3000
 const TRACK_END_EPSILON_MS = 800
@@ -27,6 +29,18 @@ export interface RoomSync {
   resume: () => void
 }
 
+/** Distance in ms to the current track's start or end, using only local canonical state — no API call needed to decide how urgently to poll. */
+function nextPollDelay(state: RoomState): number {
+  if (!state.isPlaying || state.currentIndex < 0) return SLOW_POLL_MS
+  const current = state.queue[state.currentIndex]
+  if (!current) return SLOW_POLL_MS
+
+  const expectedPositionMs = state.positionMs + (Date.now() - state.updatedAt)
+  const remainingMs = current.track.durationMs - expectedPositionMs
+  const nearBoundary = expectedPositionMs < BOUNDARY_WINDOW_MS || remainingMs < BOUNDARY_WINDOW_MS
+  return nearBoundary ? FAST_POLL_MS : SLOW_POLL_MS
+}
+
 export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSync {
   const [clientId, setClientId] = useState<string | null>(null)
   const [isHost, setIsHost] = useState(false)
@@ -41,45 +55,26 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
   const lastUnresolvedItemIdRef = useRef<string | null>(null)
 
   useEffect(() => {
-    roomStateRef.current = roomState
-  }, [roomState])
-  useEffect(() => {
     isHostRef.current = isHost
   }, [isHost])
 
-  useEffect(() => {
-    const conn = connectRoom(roomId)
-    connRef.current = conn
-    conn.onMessage((event: RelayEvent) => {
-      if (event.type === 'hello') {
-        setClientId(event.clientId)
-        setIsHost(event.isHost)
-        setRoomState(event.state)
-      } else if (event.type === 'room:sync') {
-        setRoomState(event.state)
-      }
-    })
-    return () => {
-      conn.close()
-      connRef.current = null
-    }
-  }, [roomId])
-
-  useEffect(() => {
-    const tick = async () => {
-      const state = roomStateRef.current
-      const conn = connRef.current
-      if (!state || !conn) return
-
+  /**
+   * Polls this client's own playback once and reconciles it toward `state`.
+   * Always polls (the caller may need the fresh reading regardless of whether
+   * a correction happens, e.g. the reporter's auto-advance check) — only the
+   * correction itself is skipped when `withinCooldown` and `skipCooldown`
+   * isn't set. `skipCooldown` is for the immediate-event path: a freshly
+   * arrived explicit goto/pause/resume is a trustworthy new command, not the
+   * kind of aftershock-of-our-own-correction noise the cooldown guards
+   * against for the periodic poll.
+   */
+  const reconcile = useCallback(
+    async (state: RoomState, opts?: { skipCooldown?: boolean }): Promise<AdapterPlaybackState | null> => {
       const playback = await adapter.getState().catch((err: Error) => {
         onLog(`Sync: playback poll error — ${err.message}`)
         return null
       })
-      // A failed poll gives us no reliable data to reconcile or report against —
-      // acting on it (e.g. treating a missing response as "not playing") is how
-      // you get spurious corrections. Wait for the next tick instead.
-      if (!playback) return
-
+      if (!playback) return null
       lastKnownPositionRef.current = playback.positionMs
 
       const current = state.currentIndex >= 0 ? state.queue[state.currentIndex] : null
@@ -88,13 +83,6 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
         ? state.positionMs + (Date.now() - state.updatedAt)
         : state.positionMs
 
-      // Reconcile own playback against the canonical room state. Runs for every
-      // client, regardless of platform or reporter status. Corrections tend to
-      // make the underlying player report transiently stale state for a moment
-      // afterwards, so the cooldown gates the whole reconciliation, not just the
-      // drift branch — otherwise every correction's own aftershock looks like a
-      // fresh mismatch on the very next tick, producing a once-a-second
-      // correct/stutter/correct loop.
       if (current && !expectedUri) {
         // resolveTrackUri came back empty — nothing plays for this client until
         // it does, but the "Now playing" panel still reflects canonical state
@@ -104,40 +92,111 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
           onLog(`Sync: couldn't find "${current.track.title}" by ${current.track.artist} on ${adapter.platform} (no ISRC/search match)`)
           lastUnresolvedItemIdRef.current = current.id
         }
+        return playback
       }
 
-      const withinCooldown = Date.now() - lastCorrectionAtRef.current < CORRECTION_COOLDOWN_MS
+      const withinCooldown = !opts?.skipCooldown && Date.now() - lastCorrectionAtRef.current < CORRECTION_COOLDOWN_MS
       if (expectedUri && !withinCooldown) {
-        try {
-          if (playback.platformId !== expectedUri) {
-            await adapter.play(expectedUri, expectedPositionMs)
-            onLog(`Sync: switched to "${current!.track.title}"`)
-            lastCorrectionAtRef.current = Date.now()
-          } else if (playback.isPlaying !== state.isPlaying) {
-            if (state.isPlaying) await adapter.play(undefined, expectedPositionMs)
-            else await adapter.pause()
-            onLog(`Sync: corrected ${state.isPlaying ? 'resume' : 'pause'}`)
-            lastCorrectionAtRef.current = Date.now()
-          } else if (state.isPlaying) {
-            const drift = Math.abs(playback.positionMs - expectedPositionMs)
-            if (drift > DRIFT_THRESHOLD_MS) {
+        const needsTrackSwitch = playback.platformId !== expectedUri
+        const needsPlayPauseFix = !needsTrackSwitch && playback.isPlaying !== state.isPlaying
+        const drift = !needsTrackSwitch && !needsPlayPauseFix && state.isPlaying ? Math.abs(playback.positionMs - expectedPositionMs) : 0
+        const needsDriftFix = drift > DRIFT_THRESHOLD_MS
+
+        if (needsTrackSwitch || needsPlayPauseFix || needsDriftFix) {
+          // Engage the cooldown before attempting, not after succeeding — a
+          // *failed* correction (e.g. a 429) still needs to back off, or it
+          // just retries every tick into an already-rate-limited API, which
+          // extends the rate limit and produces a correction storm based on
+          // increasingly stale data (this is what actually happened above).
+          lastCorrectionAtRef.current = Date.now()
+          try {
+            if (needsTrackSwitch) {
+              await adapter.play(expectedUri, expectedPositionMs)
+              onLog(`Sync: switched to "${current!.track.title}"`)
+            } else if (needsPlayPauseFix) {
+              if (state.isPlaying) await adapter.play(undefined, expectedPositionMs)
+              else await adapter.pause()
+              onLog(`Sync: corrected ${state.isPlaying ? 'resume' : 'pause'}`)
+            } else {
               await adapter.seek(expectedPositionMs)
               onLog(`Sync: corrected drift of ${Math.round(drift)}ms`)
-              lastCorrectionAtRef.current = Date.now()
             }
+          } catch (err) {
+            onLog(`Sync: correction failed — ${(err as Error).message}`)
           }
-        } catch (err) {
-          onLog(`Sync: correction failed — ${(err as Error).message}`)
         }
       }
 
-      // Reporter-only: report ground-truth position, and auto-advance the shared
-      // queue when this client's own track finishes. Only once room playback has
-      // actually been started (currentIndex >= 0) — otherwise leftover playback
-      // from before joining the room would spuriously trigger an advance.
-      if (isHostRef.current && state.currentIndex >= 0 && playback.durationMs != null) {
-        const trackEnded = playback.durationMs > 0 && playback.positionMs >= playback.durationMs - TRACK_END_EPSILON_MS
+      return playback
+    },
+    [adapter, onLog],
+  )
 
+  // Referenced (not called directly) from the WS message handler below, so
+  // that effect doesn't need `reconcile` in its own dependency array and
+  // doesn't reconnect the socket whenever adapter/onLog identity changes.
+  const reconcileRef = useRef(reconcile)
+  useEffect(() => {
+    reconcileRef.current = reconcile
+  }, [reconcile])
+
+  useEffect(() => {
+    const conn = connectRoom(roomId)
+    connRef.current = conn
+    conn.onMessage((event: RelayEvent) => {
+      if (event.type === 'hello') {
+        setClientId(event.clientId)
+        setIsHost(event.isHost)
+        setRoomState(event.state)
+        roomStateRef.current = event.state
+        void reconcileRef.current(event.state, { skipCooldown: true })
+      } else if (event.type === 'room:sync') {
+        const prev = roomStateRef.current
+        setRoomState(event.state)
+        roomStateRef.current = event.state
+        // Only react instantly to an actual transition (goto/pause/resume).
+        // Routine playback:report broadcasts only touch positionMs and land
+        // constantly — reacting to those too would defeat the point of
+        // slowing the periodic poll down.
+        const isTransition = !prev || prev.currentIndex !== event.state.currentIndex || prev.isPlaying !== event.state.isPlaying
+        if (isTransition) void reconcileRef.current(event.state, { skipCooldown: true })
+      }
+    })
+    return () => {
+      conn.close()
+      connRef.current = null
+    }
+  }, [roomId])
+
+  // Adaptive periodic poll: drift correction and the reporter's auto-advance
+  // check. Self-schedules via setTimeout rather than setInterval so the next
+  // delay can depend on how close to a track boundary we currently are.
+  useEffect(() => {
+    let timeoutHandle: ReturnType<typeof setTimeout>
+    let cancelled = false
+
+    const scheduleNext = (delay: number) => {
+      if (cancelled) return
+      timeoutHandle = setTimeout(() => void tick(), delay)
+    }
+
+    const tick = async () => {
+      const state = roomStateRef.current
+      const conn = connRef.current
+      if (!state || !conn) {
+        scheduleNext(SLOW_POLL_MS)
+        return
+      }
+
+      const playback = await reconcile(state)
+
+      // Reporter-only: report ground-truth position, and auto-advance the
+      // shared queue when this client's own track finishes. Only once room
+      // playback has actually started (currentIndex >= 0) — otherwise
+      // leftover playback from before joining the room would spuriously
+      // trigger an advance.
+      if (isHostRef.current && state.currentIndex >= 0 && playback?.durationMs != null) {
+        const trackEnded = playback.durationMs > 0 && playback.positionMs >= playback.durationMs - TRACK_END_EPSILON_MS
         if (trackEnded) {
           const nextIndex = state.currentIndex + 1
           if (nextIndex < state.queue.length) {
@@ -149,11 +208,16 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
           conn.send({ type: 'playback:report', positionMs: playback.positionMs })
         }
       }
+
+      scheduleNext(nextPollDelay(state))
     }
 
-    const handle = setInterval(() => void tick(), POLL_INTERVAL_MS)
-    return () => clearInterval(handle)
-  }, [roomId, adapter, onLog])
+    scheduleNext(SLOW_POLL_MS) // the WS "hello"/room:sync handlers already cover the instant-reaction case
+    return () => {
+      cancelled = true
+      clearTimeout(timeoutHandle)
+    }
+  }, [roomId, reconcile])
 
   // Every connected client can control playback — this is a shared session, not
   // a single-controller room. `isHost` is exposed for informational purposes

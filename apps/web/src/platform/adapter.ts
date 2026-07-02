@@ -36,42 +36,78 @@ interface SpotifyAdapterDeps {
 }
 
 export function createSpotifyAdapter({ getAccessToken, getDeviceId }: SpotifyAdapterDeps): PlaybackAdapter {
+  // Spotify's rate limit is per-app, shared across every user authenticated
+  // through this client_id — with multiple Spotify clients in a room all
+  // polling once a second, it's realistic to hit it. On a 429, back off for
+  // however long Spotify says (Retry-After) and just keep answering with the
+  // last known state instead of erroring every tick, so a temporary rate
+  // limit doesn't look like a poll failure or block reconciliation from
+  // seeing a coherent state.
+  let cachedState: AdapterPlaybackState = { isPlaying: false, positionMs: 0, durationMs: null, platformId: null }
+  let blockedUntil = 0
+
+  // All Spotify calls go through here so a 429 anywhere (not just getState)
+  // sets the shared backoff, and every call checks it first — attempting a
+  // play/pause/seek while we already know we're rate-limited just wastes a
+  // doomed request and can extend the block further.
+  async function withRateLimit<T>(fn: () => Promise<T>): Promise<T> {
+    if (Date.now() < blockedUntil) {
+      throw new spotifyPlayer.SpotifyRateLimitError(blockedUntil - Date.now())
+    }
+    try {
+      return await fn()
+    } catch (err) {
+      if (err instanceof spotifyPlayer.SpotifyRateLimitError) blockedUntil = Date.now() + err.retryAfterMs
+      throw err
+    }
+  }
+
   return {
     platform: 'spotify',
 
     async getState() {
-      const token = await getAccessToken()
-      const state = await spotifyPlayer.getPlaybackState(token)
-      if (!state) {
-        // 204 from Spotify = nothing currently loaded on any device — normal
-        // for a freshly-selected device, NOT a poll failure. Returning null
-        // here would make useRoomSync treat it as "poll failed, skip this
-        // tick," which means a device that's never played anything could
-        // never be told to start (reconciliation bails before ever calling
-        // adapter.play()).
-        return { isPlaying: false, positionMs: 0, durationMs: null, platformId: null }
-      }
-      return {
-        isPlaying: state.is_playing,
-        positionMs: state.progress_ms ?? 0,
-        durationMs: state.item?.duration_ms ?? null,
-        platformId: state.item?.uri ?? null,
+      if (Date.now() < blockedUntil) return cachedState
+      try {
+        const state = await withRateLimit(async () => spotifyPlayer.getPlaybackState(await getAccessToken()))
+        cachedState = state
+          ? {
+              isPlaying: state.is_playing,
+              positionMs: state.progress_ms ?? 0,
+              durationMs: state.item?.duration_ms ?? null,
+              platformId: state.item?.uri ?? null,
+            }
+          // 204 from Spotify = nothing currently loaded on any device — normal
+          // for a freshly-selected device, NOT a poll failure. Treating it as
+          // one (returning null) would make useRoomSync skip the tick, which
+          // means a device that's never played anything could never be told
+          // to start (reconciliation bails before ever calling adapter.play()).
+          : { isPlaying: false, positionMs: 0, durationMs: null, platformId: null }
+        return cachedState
+      } catch (err) {
+        if (err instanceof spotifyPlayer.SpotifyRateLimitError) return cachedState
+        throw err
       }
     },
 
     async play(platformId, positionMs) {
-      const token = await getAccessToken()
-      await spotifyPlayer.play(token, getDeviceId(), platformId, positionMs)
+      await withRateLimit(async () => {
+        const token = await getAccessToken()
+        await spotifyPlayer.play(token, getDeviceId(), platformId, positionMs)
+      })
     },
 
     async pause() {
-      const token = await getAccessToken()
-      await spotifyPlayer.pause(token, getDeviceId())
+      await withRateLimit(async () => {
+        const token = await getAccessToken()
+        await spotifyPlayer.pause(token, getDeviceId())
+      })
     },
 
     async seek(positionMs) {
-      const token = await getAccessToken()
-      await spotifyPlayer.seek(token, getDeviceId(), positionMs)
+      await withRateLimit(async () => {
+        const token = await getAccessToken()
+        await spotifyPlayer.seek(token, getDeviceId(), positionMs)
+      })
     },
 
     async search(query) {

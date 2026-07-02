@@ -28,6 +28,15 @@ export interface QueueState {
   queue: SpotifyTrackSummary[]
 }
 
+/** Spotify enforces rate limits per app (client_id), aggregated across every user authenticated through it — not per-user. */
+export class SpotifyRateLimitError extends Error {
+  retryAfterMs: number
+  constructor(retryAfterMs: number) {
+    super(`Spotify API rate limit exceeded, retry after ${retryAfterMs}ms`)
+    this.retryAfterMs = retryAfterMs
+  }
+}
+
 async function spotifyFetch(accessToken: string, path: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -36,6 +45,10 @@ async function spotifyFetch(accessToken: string, path: string, init?: RequestIni
       ...(init?.headers ?? {}),
     },
   })
+  if (res.status === 429) {
+    const retryAfterSeconds = Number(res.headers.get('Retry-After') ?? '1')
+    throw new SpotifyRateLimitError(retryAfterSeconds * 1000)
+  }
   if (!res.ok && res.status !== 204) {
     throw new Error(`Spotify API ${res.status} ${path}: ${await res.text()}`)
   }
