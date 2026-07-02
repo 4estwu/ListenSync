@@ -78,7 +78,12 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
       lastKnownPositionRef.current = playback.positionMs
 
       const current = state.currentIndex >= 0 ? state.queue[state.currentIndex] : null
-      const expectedUri = current ? await resolveTrackUri(adapter, current.track, resolvedUriCacheRef.current) : null
+      const expectedUri = current
+        ? await resolveTrackUri(adapter, current.track, resolvedUriCacheRef.current).catch((err: Error) => {
+            onLog(`Sync: resolve error — ${err.message}`)
+            return null
+          })
+        : null
       const expectedPositionMs = state.isPlaying
         ? state.positionMs + (Date.now() - state.updatedAt)
         : state.positionMs
@@ -188,28 +193,39 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
         return
       }
 
-      const playback = await reconcile(state)
+      // Polling is self-scheduling (recursive setTimeout): scheduleNext() at
+      // the end is what keeps it alive. An uncaught throw anywhere in here —
+      // resolveTrackUri hitting a rate limit, an adapter call erroring in a
+      // way reconcile() doesn't already catch, anything — would silently kill
+      // the loop forever, since nothing after the throw would run. The
+      // try/finally guarantees scheduling continues no matter what happens
+      // above it.
+      try {
+        const playback = await reconcile(state)
 
-      // Reporter-only: report ground-truth position, and auto-advance the
-      // shared queue when this client's own track finishes. Only once room
-      // playback has actually started (currentIndex >= 0) — otherwise
-      // leftover playback from before joining the room would spuriously
-      // trigger an advance.
-      if (isHostRef.current && state.currentIndex >= 0 && playback?.durationMs != null) {
-        const trackEnded = playback.durationMs > 0 && playback.positionMs >= playback.durationMs - TRACK_END_EPSILON_MS
-        if (trackEnded) {
-          const nextIndex = state.currentIndex + 1
-          if (nextIndex < state.queue.length) {
-            conn.send({ type: 'playback:goto', index: nextIndex })
+        // Reporter-only: report ground-truth position, and auto-advance the
+        // shared queue when this client's own track finishes. Only once room
+        // playback has actually started (currentIndex >= 0) — otherwise
+        // leftover playback from before joining the room would spuriously
+        // trigger an advance.
+        if (isHostRef.current && state.currentIndex >= 0 && playback?.durationMs != null) {
+          const trackEnded = playback.durationMs > 0 && playback.positionMs >= playback.durationMs - TRACK_END_EPSILON_MS
+          if (trackEnded) {
+            const nextIndex = state.currentIndex + 1
+            if (nextIndex < state.queue.length) {
+              conn.send({ type: 'playback:goto', index: nextIndex })
+            } else {
+              conn.send({ type: 'playback:pause', positionMs: playback.positionMs })
+            }
           } else {
-            conn.send({ type: 'playback:pause', positionMs: playback.positionMs })
+            conn.send({ type: 'playback:report', positionMs: playback.positionMs })
           }
-        } else {
-          conn.send({ type: 'playback:report', positionMs: playback.positionMs })
         }
+      } catch (err) {
+        onLog(`Sync: unexpected error — ${(err as Error).message}`)
+      } finally {
+        scheduleNext(nextPollDelay(state))
       }
-
-      scheduleNext(nextPollDelay(state))
     }
 
     scheduleNext(SLOW_POLL_MS) // the WS "hello"/room:sync handlers already cover the instant-reaction case

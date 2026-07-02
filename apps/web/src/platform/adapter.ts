@@ -111,22 +111,26 @@ export function createSpotifyAdapter({ getAccessToken, getDeviceId }: SpotifyAda
     },
 
     async search(query) {
-      const token = await getAccessToken()
-      const results = await spotifyPlayer.searchTracks(token, query)
-      return results.map((t) => ({
-        title: t.name,
-        artist: t.artists.map((a) => a.name).join(', '),
-        durationMs: t.duration_ms,
-        isrc: t.external_ids?.isrc,
-        platformId: t.uri,
-        artworkUrl: t.album.images.at(-1)?.url,
-      }))
+      return withRateLimit(async () => {
+        const token = await getAccessToken()
+        const results = await spotifyPlayer.searchTracks(token, query)
+        return results.map((t) => ({
+          title: t.name,
+          artist: t.artists.map((a) => a.name).join(', '),
+          durationMs: t.duration_ms,
+          isrc: t.external_ids?.isrc,
+          platformId: t.uri,
+          artworkUrl: t.album.images.at(-1)?.url,
+        }))
+      })
     },
 
     async resolveByIsrc(isrc) {
-      const token = await getAccessToken()
-      const result = await spotifyPlayer.searchByIsrc(token, isrc)
-      return result?.uri ?? null
+      return withRateLimit(async () => {
+        const token = await getAccessToken()
+        const result = await spotifyPlayer.searchByIsrc(token, isrc)
+        return result?.uri ?? null
+      })
     },
   }
 }
