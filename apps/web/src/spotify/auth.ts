@@ -1,0 +1,117 @@
+import { consumeCodeVerifier, createPkcePair, storeCodeVerifier } from './pkce'
+
+const CLIENT_ID = import.meta.env.VITE_SPOTIFY_CLIENT_ID as string
+const REDIRECT_URI = import.meta.env.VITE_SPOTIFY_REDIRECT_URI as string
+const TOKEN_KEY = 'spotify_token'
+
+// user-read-playback-state / user-modify-playback-state: read/control an existing
+// Spotify Connect device. Not requesting `streaming` since we're not running an
+// in-browser Web Playback SDK device yet.
+const SCOPES = [
+  'user-read-playback-state',
+  'user-modify-playback-state',
+  'user-read-currently-playing',
+].join(' ')
+
+export interface SpotifyToken {
+  accessToken: string
+  refreshToken: string
+  expiresAt: number
+}
+
+interface TokenResponse {
+  access_token: string
+  refresh_token?: string
+  expires_in: number
+}
+
+export function getStoredToken(): SpotifyToken | null {
+  const raw = sessionStorage.getItem(TOKEN_KEY)
+  return raw ? (JSON.parse(raw) as SpotifyToken) : null
+}
+
+function storeToken(token: SpotifyToken): void {
+  sessionStorage.setItem(TOKEN_KEY, JSON.stringify(token))
+}
+
+export function logout(): void {
+  sessionStorage.removeItem(TOKEN_KEY)
+}
+
+export async function redirectToAuthorize(): Promise<void> {
+  const { verifier, challenge } = await createPkcePair()
+  storeCodeVerifier(verifier)
+
+  const params = new URLSearchParams({
+    client_id: CLIENT_ID,
+    response_type: 'code',
+    redirect_uri: REDIRECT_URI,
+    code_challenge_method: 'S256',
+    code_challenge: challenge,
+    scope: SCOPES,
+  })
+
+  window.location.href = `https://accounts.spotify.com/authorize?${params.toString()}`
+}
+
+function tokenFromResponse(data: TokenResponse, fallbackRefreshToken?: string): SpotifyToken {
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token ?? fallbackRefreshToken ?? '',
+    expiresAt: Date.now() + data.expires_in * 1000,
+  }
+}
+
+/** Reads `code` from the current URL, exchanges it for a token, and strips the query string. */
+export async function handleRedirectCallback(): Promise<SpotifyToken | null> {
+  const params = new URLSearchParams(window.location.search)
+  const error = params.get('error')
+  const code = params.get('code')
+
+  if (error) throw new Error(`Spotify authorization failed: ${error}`)
+  if (!code) return null
+
+  const verifier = consumeCodeVerifier()
+  if (!verifier) throw new Error('Missing PKCE code verifier — start login again.')
+
+  const res = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: REDIRECT_URI,
+      client_id: CLIENT_ID,
+      code_verifier: verifier,
+    }),
+  })
+  if (!res.ok) throw new Error(`Token exchange failed: ${res.status} ${await res.text()}`)
+
+  const token = tokenFromResponse((await res.json()) as TokenResponse)
+  storeToken(token)
+  window.history.replaceState({}, '', window.location.pathname)
+  return token
+}
+
+export async function refreshAccessToken(refreshToken: string): Promise<SpotifyToken> {
+  const res = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: CLIENT_ID,
+    }),
+  })
+  if (!res.ok) throw new Error(`Token refresh failed: ${res.status}`)
+
+  const token = tokenFromResponse((await res.json()) as TokenResponse, refreshToken)
+  storeToken(token)
+  return token
+}
+
+/** Returns a valid access token, refreshing first if the stored one is expired or about to expire. */
+export async function ensureFreshToken(token: SpotifyToken): Promise<SpotifyToken> {
+  if (Date.now() < token.expiresAt - 30_000) return token
+  return refreshAccessToken(token.refreshToken)
+}
