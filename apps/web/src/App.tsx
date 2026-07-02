@@ -1,55 +1,188 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { Platform } from '@spotifyapple/shared'
 import {
   consumePendingRoom,
+  ensureFreshToken,
   getStoredToken,
   handleRedirectCallback,
   redirectToAuthorize,
   type SpotifyToken,
 } from './spotify/auth'
+import { getDevices, type SpotifyDevice } from './spotify/player'
+import { authorizeAppleMusic, getMusicKit } from './apple/musicKit'
+import { createAppleAdapter, createSpotifyAdapter } from './platform/adapter'
+import RoomChooser from './RoomChooser'
 import RoomView from './RoomView'
 import './App.css'
 
-function generateRoomCode(): string {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // no ambiguous 0/O/1/I, easier to read aloud
-  const values = crypto.getRandomValues(new Uint8Array(6))
-  return Array.from(values, (v) => chars[v % chars.length]).join('')
-}
-
 function App() {
-  const [token, setToken] = useState<SpotifyToken | null>(null)
-  const [authError, setAuthError] = useState<string | null>(null)
+  const [platform, setPlatform] = useState<Platform | null>(null)
   const [roomId, setRoomId] = useState<string | null>(null)
   const [joinCode, setJoinCode] = useState('')
-
   const [pendingRoomFromUrl] = useState(() => new URLSearchParams(window.location.search).get('room'))
+
+  // --- Spotify ---
+  const [spotifyToken, setSpotifyToken] = useState<SpotifyToken | null>(null)
+  const [spotifyAuthError, setSpotifyAuthError] = useState<string | null>(null)
+  const [devices, setDevices] = useState<SpotifyDevice[]>([])
+  const [deviceId, setDeviceId] = useState('')
+
+  const spotifyTokenRef = useRef(spotifyToken)
+  useEffect(() => {
+    spotifyTokenRef.current = spotifyToken
+  }, [spotifyToken])
+  const deviceIdRef = useRef(deviceId)
+  useEffect(() => {
+    deviceIdRef.current = deviceId
+  }, [deviceId])
+
+  const getSpotifyAccessToken = useCallback(async () => {
+    if (!spotifyTokenRef.current) throw new Error('Not logged in to Spotify')
+    const fresh = await ensureFreshToken(spotifyTokenRef.current)
+    if (fresh !== spotifyTokenRef.current) {
+      spotifyTokenRef.current = fresh
+      setSpotifyToken(fresh)
+    }
+    return fresh.accessToken
+  }, [])
+  const getDeviceId = useCallback(() => deviceIdRef.current, [])
+
+  const spotifyAdapter = useMemo(
+    () => createSpotifyAdapter({ getAccessToken: getSpotifyAccessToken, getDeviceId }),
+    [getSpotifyAccessToken, getDeviceId],
+  )
+
+  const refreshDevices = useCallback(async () => {
+    try {
+      const accessToken = await getSpotifyAccessToken()
+      const list = await getDevices(accessToken)
+      setSpotifyAuthError(null)
+      setDevices(list)
+      const active = list.find((d) => d.is_active)
+      if (active) setDeviceId(active.id)
+      else if (list[0]) setDeviceId(list[0].id)
+    } catch (err) {
+      setSpotifyAuthError((err as Error).message)
+    }
+  }, [getSpotifyAccessToken])
 
   useEffect(() => {
     handleRedirectCallback()
       .then((exchanged) => {
         if (exchanged) {
-          setToken(exchanged)
+          setPlatform('spotify')
+          setSpotifyToken(exchanged)
           const pending = consumePendingRoom()
           if (pending) setRoomId(pending)
           return
         }
         const stored = getStoredToken()
-        if (stored) setToken(stored)
+        if (stored) setSpotifyToken(stored)
       })
-      .catch((err: Error) => setAuthError(err.message))
+      .catch((err: Error) => setSpotifyAuthError(err.message))
   }, [])
 
-  // Already logged in (no OAuth redirect just happened) and opened a share link directly.
   useEffect(() => {
-    if (token && pendingRoomFromUrl && !roomId) setRoomId(pendingRoomFromUrl)
-  }, [token, pendingRoomFromUrl, roomId])
+    if (platform === 'spotify' && spotifyToken) void refreshDevices()
+  }, [platform, spotifyToken, refreshDevices])
 
-  if (!token) {
+  // --- Apple Music ---
+  const [musicKitInstance, setMusicKitInstance] = useState<MusicKit.MusicKitInstance | null>(null)
+  const [appleAuthorizing, setAppleAuthorizing] = useState(false)
+  const [appleAuthError, setAppleAuthError] = useState<string | null>(null)
+
+  const appleAdapter = useMemo(() => (musicKitInstance ? createAppleAdapter(musicKitInstance) : null), [musicKitInstance])
+
+  const handleAppleLogin = async () => {
+    setAppleAuthorizing(true)
+    setAppleAuthError(null)
+    try {
+      await authorizeAppleMusic()
+      setMusicKitInstance(await getMusicKit())
+    } catch (err) {
+      setAppleAuthError((err as Error).message)
+    } finally {
+      setAppleAuthorizing(false)
+    }
+  }
+
+  // --- Room join (either platform) ---
+  // For Spotify, wait until a device is picked too — otherwise playback has nothing to control.
+  useEffect(() => {
+    if (roomId || !pendingRoomFromUrl) return
+    if (platform === 'spotify' && spotifyToken && deviceId) setRoomId(pendingRoomFromUrl)
+    if (platform === 'apple' && musicKitInstance) setRoomId(pendingRoomFromUrl)
+  }, [platform, spotifyToken, deviceId, musicKitInstance, roomId, pendingRoomFromUrl])
+
+  const inviteHeading = pendingRoomFromUrl ? "You've been invited to a listening room" : 'Synced listening'
+
+  if (!platform) {
     return (
       <section id="center">
-        <h1>{pendingRoomFromUrl ? "You've been invited to a listening room" : 'Synced listening'}</h1>
-        {authError && <p style={{ color: 'tomato' }}>{authError}</p>}
-        <button type="button" onClick={() => void redirectToAuthorize(pendingRoomFromUrl ?? undefined)}>
-          {pendingRoomFromUrl ? 'Log in with Spotify to join' : 'Log in with Spotify'}
+        <h1>{inviteHeading}</h1>
+        <p>Pick the platform you'll use to listen — your account, your playback.</p>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+          <button type="button" onClick={() => setPlatform('spotify')}>
+            Continue with Spotify
+          </button>
+          <button type="button" onClick={() => setPlatform('apple')}>
+            Continue with Apple Music
+          </button>
+        </div>
+      </section>
+    )
+  }
+
+  if (platform === 'spotify') {
+    if (!spotifyToken) {
+      return (
+        <section id="center">
+          <h1>{inviteHeading}</h1>
+          {spotifyAuthError && <p style={{ color: 'tomato' }}>{spotifyAuthError}</p>}
+          <button type="button" onClick={() => void redirectToAuthorize(pendingRoomFromUrl ?? undefined)}>
+            {pendingRoomFromUrl ? 'Log in with Spotify to join' : 'Log in with Spotify'}
+          </button>
+        </section>
+      )
+    }
+
+    if (!roomId) {
+      return (
+        <section id="center">
+          <h1>Pick a playback device</h1>
+          {spotifyAuthError && <p style={{ color: 'tomato' }}>{spotifyAuthError}</p>}
+          <button type="button" onClick={() => void refreshDevices()}>
+            Refresh devices
+          </button>
+          <select value={deviceId} onChange={(e) => setDeviceId(e.target.value)}>
+            <option value="">— select device —</option>
+            {devices.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name} ({d.type}){d.is_active ? ' — active' : ''}
+              </option>
+            ))}
+          </select>
+          {devices.length === 0 && !spotifyAuthError && (
+            <p style={{ opacity: 0.7 }}>
+              No devices found — open Spotify on a phone/desktop app first, then click "Refresh devices".
+            </p>
+          )}
+          <RoomChooser setRoomId={setRoomId} joinCode={joinCode} setJoinCode={setJoinCode} disabled={!deviceId} />
+        </section>
+      )
+    }
+
+    return <RoomView roomId={roomId} adapter={spotifyAdapter} />
+  }
+
+  // platform === 'apple'
+  if (!musicKitInstance) {
+    return (
+      <section id="center">
+        <h1>{inviteHeading}</h1>
+        {appleAuthError && <p style={{ color: 'tomato' }}>{appleAuthError}</p>}
+        <button type="button" onClick={() => void handleAppleLogin()} disabled={appleAuthorizing}>
+          {appleAuthorizing ? 'Opening Apple Music sign-in…' : 'Log in with Apple Music'}
         </button>
       </section>
     )
@@ -58,23 +191,13 @@ function App() {
   if (!roomId) {
     return (
       <section id="center">
-        <h1>Start or join a room</h1>
-        <div>
-          <button type="button" onClick={() => setRoomId(generateRoomCode())}>
-            Create a room
-          </button>
-        </div>
-        <div style={{ marginTop: 12 }}>
-          <input value={joinCode} onChange={(e) => setJoinCode(e.target.value.toUpperCase())} placeholder="room code" />
-          <button type="button" onClick={() => setRoomId(joinCode.trim())} disabled={!joinCode.trim()}>
-            Join
-          </button>
-        </div>
+        <h1>Synced listening</h1>
+        <RoomChooser setRoomId={setRoomId} joinCode={joinCode} setJoinCode={setJoinCode} />
       </section>
     )
   }
 
-  return <RoomView roomId={roomId} token={token} setToken={setToken} />
+  return <RoomView roomId={roomId} adapter={appleAdapter!} />
 }
 
 export default App

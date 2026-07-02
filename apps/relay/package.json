@@ -11,9 +11,12 @@
   },
   "dependencies": {
     "@spotifyapple/shared": "*",
+    "dotenv": "^16.4.5",
+    "jsonwebtoken": "^9.0.2",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.5.0",
     "@types/ws": "^8.5.12",
     "tsx": "^4.19.0",

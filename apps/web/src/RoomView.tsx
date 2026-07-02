@@ -1,50 +1,27 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { Track } from '@spotifyapple/shared'
-import { ensureFreshToken, type SpotifyToken } from './spotify/auth'
-import {
-  getDevices,
-  searchTracks,
-  type SpotifyDevice,
-  type SpotifyTrackSummary,
-} from './spotify/player'
+import type { AdapterTrackResult, PlaybackAdapter } from './platform/adapter'
 import { useRoomSync } from './sync/useRoomSync'
 
-function toSharedTrack(t: SpotifyTrackSummary): Track {
+function toSharedTrack(adapter: PlaybackAdapter, result: AdapterTrackResult): Track {
   return {
-    title: t.name,
-    artist: t.artists.map((a) => a.name).join(', '),
-    durationMs: t.duration_ms,
-    platformIds: { spotify: t.uri },
-    // TODO: populate platformIds.apple / isrc once Apple Music search exists
+    title: result.title,
+    artist: result.artist,
+    durationMs: result.durationMs,
+    isrc: result.isrc,
+    platformIds: { [adapter.platform]: result.platformId },
   }
 }
 
 interface RoomViewProps {
   roomId: string
-  token: SpotifyToken
-  setToken: (token: SpotifyToken) => void
+  adapter: PlaybackAdapter
 }
 
-function RoomView({ roomId, token, setToken }: RoomViewProps) {
-  const tokenRef = useRef(token)
-  useEffect(() => {
-    tokenRef.current = token
-  }, [token])
-
-  const getToken = useCallback(async () => {
-    const fresh = await ensureFreshToken(tokenRef.current)
-    if (fresh !== tokenRef.current) {
-      tokenRef.current = fresh
-      setToken(fresh)
-    }
-    return fresh
-  }, [setToken])
-
-  const [devices, setDevices] = useState<SpotifyDevice[]>([])
-  const [deviceId, setDeviceId] = useState('')
+function RoomView({ roomId, adapter }: RoomViewProps) {
   const [log, setLog] = useState<string[]>([])
   const [searchQuery, setSearchQuery] = useState('')
-  const [searchResults, setSearchResults] = useState<SpotifyTrackSummary[]>([])
+  const [searchResults, setSearchResults] = useState<AdapterTrackResult[]>([])
   const [searching, setSearching] = useState(false)
   const [linkCopied, setLinkCopied] = useState(false)
 
@@ -54,29 +31,9 @@ function RoomView({ roomId, token, setToken }: RoomViewProps) {
 
   const { clientId, roomState, addToQueue, gotoIndex, skipNext, pause, resume } = useRoomSync({
     roomId,
-    deviceId,
-    getToken,
+    adapter,
     onLog: say,
   })
-
-  const refreshDevices = useCallback(async () => {
-    try {
-      const t = await getToken()
-      const list = await getDevices(t.accessToken)
-      setDevices(list)
-      const active = list.find((d) => d.is_active)
-      if (active) setDeviceId(active.id)
-      else if (list[0]) setDeviceId(list[0].id)
-      say(`Found ${list.length} device(s).`)
-    } catch (err) {
-      say(`Device fetch error: ${(err as Error).message}`)
-    }
-  }, [getToken, say])
-
-  useEffect(() => {
-    void refreshDevices()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
 
   useEffect(() => {
     if (searchQuery.trim().length < 2) {
@@ -86,8 +43,7 @@ function RoomView({ roomId, token, setToken }: RoomViewProps) {
     const handle = setTimeout(async () => {
       setSearching(true)
       try {
-        const t = await getToken()
-        setSearchResults(await searchTracks(t.accessToken, searchQuery))
+        setSearchResults(await adapter.search(searchQuery))
       } catch (err) {
         say(`Search error: ${(err as Error).message}`)
       } finally {
@@ -95,7 +51,7 @@ function RoomView({ roomId, token, setToken }: RoomViewProps) {
       }
     }, 300)
     return () => clearTimeout(handle)
-  }, [searchQuery, getToken, say])
+  }, [searchQuery, adapter, say])
 
   const shareLink = `${window.location.origin}${window.location.pathname}?room=${roomId}`
 
@@ -115,7 +71,8 @@ function RoomView({ roomId, token, setToken }: RoomViewProps) {
     <section id="center" style={{ textAlign: 'left', maxWidth: 560, margin: '0 auto' }}>
       <h1>Listening room {roomId}</h1>
       <p>
-        Everyone here can search, queue, play, pause, and skip — it's a shared session.{' '}
+        Everyone here can search, queue, play, pause, and skip — it's a shared session, mixing Spotify and Apple
+        Music accounts.{' '}
         {clientId && <code style={{ opacity: 0.6 }}>{clientId.slice(0, 8)}</code>}
       </p>
 
@@ -123,26 +80,6 @@ function RoomView({ roomId, token, setToken }: RoomViewProps) {
         <button type="button" onClick={copyShareLink}>
           {linkCopied ? 'Copied!' : 'Copy share link'}
         </button>
-      </div>
-
-      <div style={{ marginTop: 12 }}>
-        <button type="button" onClick={() => void refreshDevices()}>
-          Refresh devices
-        </button>
-        <select value={deviceId} onChange={(e) => setDeviceId(e.target.value)}>
-          <option value="">— select device —</option>
-          {devices.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name} ({d.type}){d.is_active ? ' — active' : ''}
-            </option>
-          ))}
-        </select>
-        {devices.length === 0 && (
-          <p style={{ opacity: 0.7 }}>
-            No devices found — open Spotify on a phone/desktop app first (it needs to have been active recently),
-            then click "Refresh devices".
-          </p>
-        )}
       </div>
 
       <div style={{ marginTop: 16 }}>
@@ -163,7 +100,7 @@ function RoomView({ roomId, token, setToken }: RoomViewProps) {
       </div>
 
       <div style={{ marginTop: 16 }}>
-        <strong>Search tracks</strong>
+        <strong>Search tracks ({adapter.platform === 'spotify' ? 'Spotify' : 'Apple Music'} catalog)</strong>
         <input
           style={{ width: '100%', marginTop: 4 }}
           value={searchQuery}
@@ -174,18 +111,18 @@ function RoomView({ roomId, token, setToken }: RoomViewProps) {
         <ul style={{ listStyle: 'none', padding: 0, marginTop: 8 }}>
           {searchResults.map((track) => (
             <li
-              key={track.uri}
+              key={track.platformId}
               style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px solid #333' }}
             >
-              {track.album.images.at(-1) && <img src={track.album.images.at(-1)!.url} alt="" width={32} height={32} />}
+              {track.artworkUrl && <img src={track.artworkUrl} alt="" width={32} height={32} />}
               <span style={{ flex: 1 }}>
-                {track.name} — {track.artists.map((a) => a.name).join(', ')}
+                {track.title} — {track.artist}
               </span>
               <button
                 type="button"
                 onClick={() => {
-                  addToQueue(toSharedTrack(track), clientId ?? 'unknown')
-                  say(`Added "${track.name}" to the queue`)
+                  addToQueue(toSharedTrack(adapter, track), clientId ?? 'unknown')
+                  say(`Added "${track.title}" to the queue`)
                 }}
               >
                 + Queue

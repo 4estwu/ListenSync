@@ -13,6 +13,7 @@ export interface SpotifyTrackSummary {
   artists: { name: string }[]
   album: { name: string; images: { url: string }[] }
   duration_ms: number
+  external_ids?: { isrc?: string }
 }
 
 export interface PlaybackState {
@@ -54,7 +55,24 @@ export async function getPlaybackState(accessToken: string): Promise<PlaybackSta
   return (await res.json()) as PlaybackState
 }
 
+/**
+ * Activates deviceId as the current Spotify Connect target. Without this,
+ * `/me/player/play?device_id=X` can return success and update "what should
+ * play" without the device actually starting audio, if it was never
+ * transferred-to as the active device this session — the symptom is the
+ * track visibly changing but never actually advancing/playing.
+ */
+export async function transferPlayback(accessToken: string, deviceId: string): Promise<void> {
+  await spotifyFetch(accessToken, '/me/player', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_ids: [deviceId] }),
+  })
+}
+
 export async function play(accessToken: string, deviceId: string, trackUri?: string, positionMs?: number): Promise<void> {
+  if (trackUri) await transferPlayback(accessToken, deviceId)
+
   const body: { uris?: string[]; position_ms?: number } = {}
   if (trackUri) body.uris = [trackUri]
   if (positionMs !== undefined) body.position_ms = Math.round(positionMs)
@@ -86,6 +104,12 @@ export async function searchTracks(accessToken: string, query: string, limit = 1
   const res = await spotifyFetch(accessToken, `/search?${params.toString()}`)
   const data = (await res.json()) as { tracks: { items: SpotifyTrackSummary[] } }
   return data.tracks.items
+}
+
+/** Spotify's search supports field filters — `isrc:` restricts to an exact ISRC match. */
+export async function searchByIsrc(accessToken: string, isrc: string): Promise<SpotifyTrackSummary | null> {
+  const results = await searchTracks(accessToken, `isrc:${isrc}`, 1)
+  return results[0] ?? null
 }
 
 /** Appends a track to the end of the active device's Spotify Connect queue (Spotify's own queue, not app state). */

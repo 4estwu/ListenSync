@@ -38,5 +38,11 @@ export type RelayEvent =
   | { type: "playback:goto"; index: number }
   | { type: "playback:pause"; positionMs: number }
   | { type: "playback:resume"; positionMs: number }
-  // host -> relay only; periodic ground-truth position anchor, does NOT change currentIndex
-  | { type: "playback:report"; positionMs: number; isPlaying: boolean };
+  // host -> relay only; periodic ground-truth position anchor. Does NOT touch
+  // currentIndex or isPlaying — those are only ever set by explicit
+  // goto/pause/resume commands, never inferred from a poll snapshot. A report
+  // reflects "what my device happened to be doing at poll time," which can be
+  // stale for up to a tick after someone else's pause/resume hasn't reconciled
+  // into this reporter's own device yet; letting it drive isPlaying caused a
+  // visible pause -> resume -> pause flicker right after every toggle.
+  | { type: "playback:report"; positionMs: number };

@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import path from "node:path";
+import { config } from "dotenv";
 import { WebSocketServer, WebSocket } from "ws";
 import type { QueueItem, RelayEvent, RoomState } from "@spotifyapple/shared";
+import { getAppleDeveloperToken } from "./appleToken.js";
+
+config({ path: path.resolve(process.cwd(), "../../.env") });
 
 const PORT = Number(process.env.PORT ?? 8787);
 
@@ -28,9 +34,16 @@ function broadcastSync(room: Room): void {
   broadcast(room, { type: "room:sync", state: room.state });
 }
 
-// Use this instead when actually changing where playback is / should be.
+// Use this when actually changing where playback is / should be (goto/pause/resume).
 function setPosition(room: Room, isPlaying: boolean, positionMs: number): void {
   room.state.isPlaying = isPlaying;
+  room.state.positionMs = positionMs;
+  room.state.updatedAt = Date.now();
+}
+
+// Use this for the reporter's periodic ground-truth anchor — deliberately does
+// NOT touch isPlaying, see the comment on RelayEvent's "playback:report".
+function reportPosition(room: Room, positionMs: number): void {
   room.state.positionMs = positionMs;
   room.state.updatedAt = Date.now();
 }
@@ -75,7 +88,23 @@ function handleGoto(room: Room, index: number): void {
   broadcastSync(room);
 }
 
-const wss = new WebSocketServer({ port: PORT });
+const httpServer = createServer((req, res) => {
+  if (req.method === "GET" && req.url === "/apple-developer-token") {
+    res.setHeader("Access-Control-Allow-Origin", "*"); // local-dev-only scope, same trust level as the rest of .env
+    try {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ token: getAppleDeveloperToken() }));
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: (err as Error).message }));
+    }
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+
+const wss = new WebSocketServer({ server: httpServer });
 
 wss.on("connection", (socket, request) => {
   const roomId = new URL(request.url ?? "", "http://localhost").searchParams.get("room");
@@ -153,7 +182,7 @@ wss.on("connection", (socket, request) => {
       // are trusted, to avoid multiple clients' poll loops racing each other.
       case "playback:report":
         if (isReporter) {
-          setPosition(room!, event.isPlaying, event.positionMs);
+          reportPosition(room!, event.positionMs);
           broadcastSync(room!);
         }
         break;
@@ -168,4 +197,6 @@ wss.on("connection", (socket, request) => {
   });
 });
 
-console.log(`relay listening on ws://127.0.0.1:${PORT}`);
+httpServer.listen(PORT, () => {
+  console.log(`relay listening on ws://127.0.0.1:${PORT} (and http://127.0.0.1:${PORT}/apple-developer-token)`);
+});
