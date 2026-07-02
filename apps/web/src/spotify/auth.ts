@@ -3,6 +3,7 @@ import { consumeCodeVerifier, createPkcePair, storeCodeVerifier } from './pkce'
 const CLIENT_ID = import.meta.env.VITE_SPOTIFY_CLIENT_ID as string
 const REDIRECT_URI = import.meta.env.VITE_SPOTIFY_REDIRECT_URI as string
 const TOKEN_KEY = 'spotify_token'
+const PENDING_ROOM_KEY = 'spotify_pending_room'
 
 // user-read-playback-state / user-modify-playback-state: read/control an existing
 // Spotify Connect device. Not requesting `streaming` since we're not running an
@@ -38,9 +39,22 @@ export function logout(): void {
   sessionStorage.removeItem(TOKEN_KEY)
 }
 
-export async function redirectToAuthorize(): Promise<void> {
+/** Reads and clears the room code stashed before an OAuth redirect (see `redirectToAuthorize`). */
+export function consumePendingRoom(): string | null {
+  const roomId = sessionStorage.getItem(PENDING_ROOM_KEY)
+  sessionStorage.removeItem(PENDING_ROOM_KEY)
+  return roomId
+}
+
+/**
+ * `pendingRoomId` survives the full OAuth redirect (stashed here, read back via
+ * `consumePendingRoom` after `handleRedirectCallback`) so a share-link join isn't
+ * lost when the user has to log in first.
+ */
+export async function redirectToAuthorize(pendingRoomId?: string): Promise<void> {
   const { verifier, challenge } = await createPkcePair()
   storeCodeVerifier(verifier)
+  if (pendingRoomId) sessionStorage.setItem(PENDING_ROOM_KEY, pendingRoomId)
 
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
