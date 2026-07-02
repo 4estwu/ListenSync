@@ -1,0 +1,71 @@
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
+import { pause, play, seek } from './player'
+
+const TRANSFER_URL = 'https://api.spotify.com/v1/me/player'
+const PLAY_URL = 'https://api.spotify.com/v1/me/player/play?device_id=device1'
+
+describe('play', () => {
+  let fetchMock: Mock
+
+  beforeEach(() => {
+    fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it(
+    'transfers playback to the device before resuming in place (no track uri) — ' +
+      'a device that lost active status can otherwise silently no-op on resume',
+    async () => {
+      await play('token', 'device1', undefined, 5000)
+
+      const urls = fetchMock.mock.calls.map((call) => call[0] as string)
+      expect(urls[0]).toBe(TRANSFER_URL)
+      expect(urls[1]).toBe(PLAY_URL)
+    },
+  )
+
+  it('transfers playback before starting a specific new track', async () => {
+    await play('token', 'device1', 'spotify:track:xyz', 0)
+
+    const urls = fetchMock.mock.calls.map((call) => call[0] as string)
+    expect(urls[0]).toBe(TRANSFER_URL)
+    expect(urls[1]).toBe(PLAY_URL)
+  })
+
+  it('the transfer call targets the right device', async () => {
+    await play('token', 'device1', undefined, undefined)
+
+    const transferCall = fetchMock.mock.calls[0]
+    const body = JSON.parse((transferCall[1] as RequestInit).body as string) as { device_ids: string[] }
+    expect(body.device_ids).toEqual(['device1'])
+  })
+})
+
+describe('pause / seek', () => {
+  let fetchMock: Mock
+
+  beforeEach(() => {
+    fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('pause does not transfer playback first (pausing an inactive device is a no-op either way)', async () => {
+    await pause('token', 'device1')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toContain('/me/player/pause')
+  })
+
+  it('seek does not transfer playback first', async () => {
+    await seek('token', 'device1', 1000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toContain('/me/player/seek')
+  })
+})

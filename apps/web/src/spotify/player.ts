@@ -84,7 +84,12 @@ export async function transferPlayback(accessToken: string, deviceId: string): P
 }
 
 export async function play(accessToken: string, deviceId: string, trackUri?: string, positionMs?: number): Promise<void> {
-  if (trackUri) await transferPlayback(accessToken, deviceId)
+  // Always transfer, not just when starting a specific new track. A device
+  // can lose its "active" status for reasons outside our control (idling,
+  // another app taking over, a stretch of failed calls during a rate limit)
+  // — resuming without re-transferring can return 200/204 while producing no
+  // audio at all, which is silent and easy to mistake for "it worked."
+  await transferPlayback(accessToken, deviceId)
 
   const body: { uris?: string[]; position_ms?: number } = {}
   if (trackUri) body.uris = [trackUri]
