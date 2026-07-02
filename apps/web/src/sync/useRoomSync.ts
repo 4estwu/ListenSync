@@ -148,6 +148,9 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
   useEffect(() => {
     const conn = connectRoom(roomId)
     connRef.current = conn
+    conn.onStatusChange((status) => {
+      onLog(status === 'connected' ? 'Sync: connected to relay' : 'Sync: lost connection to relay, reconnecting…')
+    })
     conn.onMessage((event: RelayEvent) => {
       if (event.type === 'hello') {
         setClientId(event.clientId)
