@@ -74,12 +74,22 @@ export async function getPlaybackState(accessToken: string): Promise<PlaybackSta
  * play" without the device actually starting audio, if it was never
  * transferred-to as the active device this session — the symptom is the
  * track visibly changing but never actually advancing/playing.
+ *
+ * Explicitly passes `play: true` — omitting it makes Spotify's backend "keep
+ * the current playback state" on transfer, which is ambiguous with the
+ * separate `/play` call issued right after this. Real device handshaking
+ * isn't instant, and if the transfer's own "keep state" (still paused, since
+ * we're always transferring right before a resume/play) resolves on
+ * Spotify's backend a moment after our /play call already started audio, it
+ * can silently pull playback back to paused a few seconds in — the "plays
+ * briefly then stops" symptom. Only called from play() (never pause()), so
+ * asserting play:true here always matches intent.
  */
 export async function transferPlayback(accessToken: string, deviceId: string): Promise<void> {
   await spotifyFetch(accessToken, '/me/player', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ device_ids: [deviceId] }),
+    body: JSON.stringify({ device_ids: [deviceId], play: true }),
   })
 }
 

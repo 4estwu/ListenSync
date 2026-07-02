@@ -36,13 +36,19 @@ describe('play', () => {
     expect(urls[1]).toBe(PLAY_URL)
   })
 
-  it('the transfer call targets the right device', async () => {
-    await play('token', 'device1', undefined, undefined)
+  it(
+    'the transfer call targets the right device and explicitly asserts play:true — ' +
+      'omitting it leaves Spotify\'s backend to "keep current state" (still paused, ' +
+      'since we always transfer right before a resume), which can race with and revert ' +
+      'the separate /play call a few seconds later',
+    async () => {
+      await play('token', 'device1', undefined, undefined)
 
-    const transferCall = fetchMock.mock.calls[0]
-    const body = JSON.parse((transferCall[1] as RequestInit).body as string) as { device_ids: string[] }
-    expect(body.device_ids).toEqual(['device1'])
-  })
+      const transferCall = fetchMock.mock.calls[0]
+      const body = JSON.parse((transferCall[1] as RequestInit).body as string) as { device_ids: string[]; play: boolean }
+      expect(body).toEqual({ device_ids: ['device1'], play: true })
+    },
+  )
 })
 
 describe('pause / seek', () => {
