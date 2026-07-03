@@ -35,6 +35,7 @@ export interface RoomSync {
   /** Set when this client's own device rejected a call as gone (see AdapterDeviceError); cleared automatically once a poll succeeds again. */
   deviceError: string | null
   addToQueue: (track: Track, addedBy: string) => void
+  removeFromQueue: (itemId: string) => void
   gotoIndex: (index: number) => void
   skipNext: () => void
   pause: () => void
@@ -64,6 +65,15 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
   const isHostRef = useRef(false)
   const lastKnownPositionRef = useRef(0)
   const lastCorrectionAtRef = useRef(0)
+  // Guards the reporter's auto-advance send against its own not-yet-confirmed
+  // previous goto: the poll loop re-checks "did the track end?" against
+  // roomStateRef.current, which doesn't update until this goto's room:sync
+  // echo comes back over the WS round trip — without this, a tick firing
+  // before that echo arrives sees the same stale "ended" state and resends
+  // the same goto. The relay now ignores a redundant same-index goto too
+  // (defense in depth), but suppressing the resend here also avoids the
+  // pointless extra network chatter.
+  const autoAdvancePendingRef = useRef(false)
   const resolvedUriCacheRef = useRef(new Map<string, string | null>())
   const lastUnresolvedItemIdRef = useRef<string | null>(null)
   // Rolling estimate of how long a play()/seek() call takes from decision to
@@ -237,7 +247,10 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
         // constantly — reacting to those too would defeat the point of
         // slowing the periodic poll down.
         const isTransition = !prev || prev.currentIndex !== event.state.currentIndex || prev.isPlaying !== event.state.isPlaying
-        if (isTransition) void reconcileRef.current(event.state, { skipCooldown: true })
+        if (isTransition) {
+          autoAdvancePendingRef.current = false
+          void reconcileRef.current(event.state, { skipCooldown: true })
+        }
       }
     })
     return () => {
@@ -289,6 +302,7 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
         // like "track ended" for the new one.
         if (
           isHostRef.current &&
+          !autoAdvancePendingRef.current &&
           state.currentIndex >= 0 &&
           playback?.durationMs != null &&
           expectedUri &&
@@ -296,6 +310,7 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
         ) {
           const trackEnded = playback.durationMs > 0 && playback.positionMs >= playback.durationMs - TRACK_END_EPSILON_MS
           if (trackEnded) {
+            autoAdvancePendingRef.current = true
             const nextIndex = state.currentIndex + 1
             if (nextIndex < state.queue.length) {
               conn.send({ type: 'playback:goto', index: nextIndex })
@@ -329,6 +344,10 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
     connRef.current?.send({ type: 'queue:add', item })
   }, [])
 
+  const removeFromQueue = useCallback((itemId: string) => {
+    connRef.current?.send({ type: 'queue:remove', itemId })
+  }, [])
+
   const gotoIndex = useCallback((index: number) => {
     connRef.current?.send({ type: 'playback:goto', index })
   }, [])
@@ -346,5 +365,5 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
     connRef.current?.send({ type: 'playback:resume', positionMs: lastKnownPositionRef.current })
   }, [])
 
-  return { clientId, isHost, roomState, deviceError, addToQueue, gotoIndex, skipNext, pause, resume }
+  return { clientId, isHost, roomState, deviceError, addToQueue, removeFromQueue, gotoIndex, skipNext, pause, resume }
 }

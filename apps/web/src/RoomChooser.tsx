@@ -16,7 +16,7 @@ function RoomChooser({ setRoomId, joinCode, setJoinCode, disabled }: RoomChooser
     <section style={{ marginTop: 16 }}>
       <h2>Start or join a room</h2>
       <div>
-        <button type="button" disabled={disabled} onClick={() => setRoomId(generateRoomCode())}>
+        <button type="button" className="primary" disabled={disabled} onClick={() => setRoomId(generateRoomCode())}>
           Create a room
         </button>
       </div>

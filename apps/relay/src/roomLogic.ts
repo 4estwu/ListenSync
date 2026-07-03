@@ -45,14 +45,24 @@ export function applyQueueRemove(state: RoomState, itemId: string): boolean {
   const removedIndex = state.queue.findIndex((i) => i.id === itemId);
   if (removedIndex === -1) return false;
 
+  const removingCurrent = removedIndex === state.currentIndex;
   state.queue.splice(removedIndex, 1);
   if (state.queue.length === 0) {
     state.currentIndex = -1;
     state.isPlaying = false;
   } else if (removedIndex < state.currentIndex) {
     state.currentIndex -= 1;
-  } else if (removedIndex === state.currentIndex) {
+  } else if (removingCurrent) {
     state.currentIndex = Math.min(state.currentIndex, state.queue.length - 1);
+  }
+  // Removing whatever's currently playing hands currentIndex to a different
+  // track without this — positionMs/updatedAt would still anchor to the
+  // removed track's playback, so every client's reconcile would compute
+  // "expected position" against the old track's elapsed time and seek the
+  // new one to some arbitrary nonzero position instead of starting it at 0.
+  if (removingCurrent && state.queue.length > 0) {
+    state.positionMs = 0;
+    state.updatedAt = Date.now();
   }
   return true;
 }
@@ -76,9 +86,20 @@ export function applyQueueReorder(state: RoomState, itemIds: string[]): boolean 
   return true;
 }
 
-/** Returns false (no-op) if index is out of range. */
+/**
+ * Returns false (no-op) if index is out of range, or if it's already the
+ * current index. The latter matters beyond just avoiding redundant work: a
+ * client's auto-advance check can race its own not-yet-confirmed previous
+ * goto (still polling stale local state while the first one's round trip is
+ * in flight) and resend the same goto before it learns the index already
+ * changed. Since this always reset positionMs to 0, a resent identical goto
+ * silently snapped playback back to the start of the track it had just
+ * started — the actual cause of a track appearing to "loop for a few seconds
+ * then restart" instead of cleanly advancing once.
+ */
 export function applyGoto(state: RoomState, index: number): boolean {
   if (index < 0 || index >= state.queue.length) return false;
+  if (index === state.currentIndex) return false;
   state.currentIndex = index;
   setPosition(state, true, 0);
   return true;

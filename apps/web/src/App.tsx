@@ -158,10 +158,10 @@ function App() {
         <h1>{inviteHeading}</h1>
         <p>Pick the platform you'll use to listen — your account, your playback.</p>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
-          <button type="button" onClick={() => setPlatform('spotify')}>
+          <button type="button" className="primary" onClick={() => setPlatform('spotify')}>
             Continue with Spotify
           </button>
-          <button type="button" onClick={() => setPlatform('apple')}>
+          <button type="button" className="primary" onClick={() => setPlatform('apple')}>
             Continue with Apple Music
           </button>
         </div>
@@ -175,7 +175,7 @@ function App() {
         <section id="center">
           <h1>{inviteHeading}</h1>
           {spotifyAuthError && <p style={{ color: 'tomato' }}>{spotifyAuthError}</p>}
-          <button type="button" onClick={() => void redirectToAuthorize(pendingRoomFromUrl ?? undefined)}>
+          <button type="button" className="primary" onClick={() => void redirectToAuthorize(pendingRoomFromUrl ?? undefined)}>
             {pendingRoomFromUrl ? 'Log in with Spotify to join' : 'Log in with Spotify'}
           </button>
         </section>
@@ -186,6 +186,14 @@ function App() {
       return (
         <section id="center">
           <h1>Pick a playback device</h1>
+          <p style={{ opacity: 0.75, maxWidth: 420, textAlign: 'center' }}>
+            Spotify needs an active session on the device you want to control. If you don't see it below
+            (or playback later stops responding), open Spotify and start playing anything — even paused —
+            then refresh.
+          </p>
+          <a className="button-link" href="spotify:" target="_blank" rel="noreferrer">
+            Open Spotify app
+          </a>
           {spotifyAuthError && <p style={{ color: 'tomato' }}>{spotifyAuthError}</p>}
           <button type="button" onClick={() => void refreshDevices()}>
             Refresh devices
@@ -226,7 +234,7 @@ function App() {
       <section id="center">
         <h1>{inviteHeading}</h1>
         {appleAuthError && <p style={{ color: 'tomato' }}>{appleAuthError}</p>}
-        <button type="button" onClick={() => void handleAppleLogin()} disabled={appleAuthorizing}>
+        <button type="button" className="primary" onClick={() => void handleAppleLogin()} disabled={appleAuthorizing}>
           {appleAuthorizing ? 'Opening Apple Music sign-in…' : 'Log in with Apple Music'}
         </button>
       </section>

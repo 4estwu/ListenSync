@@ -79,6 +79,35 @@ describe("applyQueueRemove", () => {
     expect(state.currentIndex).toBe(-1);
     expect(state.isPlaying).toBe(false);
   });
+
+  it("resets positionMs/updatedAt when the currently-playing item is removed and another item becomes current (regression: the new current track would otherwise inherit the removed track's stale elapsed position)", () => {
+    const state = createInitialRoomState("room1");
+    state.queue = [item("a"), item("b"), item("c")];
+    state.currentIndex = 1; // "b"
+    state.isPlaying = true;
+    state.positionMs = 90_000;
+    state.updatedAt = 1000;
+
+    applyQueueRemove(state, "b");
+
+    expect(state.queue.map((i) => i.id)).toEqual(["a", "c"]);
+    expect(state.currentIndex).toBe(1); // now points at "c"
+    expect(state.positionMs).toBe(0);
+    expect(state.updatedAt).toBeGreaterThan(1000);
+  });
+
+  it("does not touch positionMs/updatedAt when removing an item other than the currently-playing one", () => {
+    const state = createInitialRoomState("room1");
+    state.queue = [item("a"), item("b"), item("c")];
+    state.currentIndex = 2; // "c"
+    state.positionMs = 45_000;
+    state.updatedAt = 1000;
+
+    applyQueueRemove(state, "a");
+
+    expect(state.positionMs).toBe(45_000);
+    expect(state.updatedAt).toBe(1000);
+  });
 });
 
 describe("applyQueueReorder", () => {
@@ -127,6 +156,20 @@ describe("applyGoto", () => {
     expect(state.isPlaying).toBe(true);
     expect(state.positionMs).toBe(0);
     expect(state.updatedAt).toBeGreaterThan(1000);
+  });
+
+  it("is a no-op when index already equals currentIndex (regression: a racing client resending the same goto before it learned the first one landed used to reset positionMs to 0 again, making the track appear to restart)", () => {
+    const state = createInitialRoomState("room1");
+    state.queue = [item("a"), item("b")];
+    state.currentIndex = 1;
+    state.positionMs = 42_000;
+    state.updatedAt = 1000;
+
+    const ok = applyGoto(state, 1);
+
+    expect(ok).toBe(false);
+    expect(state.positionMs).toBe(42_000);
+    expect(state.updatedAt).toBe(1000);
   });
 });
 

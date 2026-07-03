@@ -29,7 +29,7 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
     setLog((prev) => [`${new Date().toLocaleTimeString()}  ${line}`, ...prev].slice(0, 30))
   }, [])
 
-  const { clientId, roomState, deviceError, addToQueue, gotoIndex, skipNext, pause, resume } = useRoomSync({
+  const { clientId, roomState, deviceError, addToQueue, removeFromQueue, gotoIndex, skipNext, pause, resume } = useRoomSync({
     roomId,
     adapter,
     onLog: say,
@@ -69,36 +69,44 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
 
   return (
     <section className="room-view">
-      <h1>Listening room {roomId}</h1>
-      <p>
-        Everyone here can search, queue, play, pause, and skip — it's a shared session, mixing Spotify and Apple
-        Music accounts.{' '}
-        {clientId && <code style={{ opacity: 0.6 }}>{clientId.slice(0, 8)}</code>}
-      </p>
-
-      <div>
-        <button type="button" onClick={copyShareLink}>
+      <header className="room-header">
+        <div>
+          <h1>Room {roomId}</h1>
+          <p className="muted">
+            Everyone here can search, queue, play, pause, and skip.
+            {clientId && <code className="client-badge">{clientId.slice(0, 8)}</code>}
+          </p>
+        </div>
+        <button type="button" className="primary" onClick={copyShareLink}>
           {linkCopied ? 'Copied!' : 'Copy share link'}
         </button>
-      </div>
+      </header>
 
       {deviceError && (
-        <p style={{ color: 'tomato', marginTop: 16 }}>
+        <div className="banner banner-error">
           Lost connection to your playback device — its session ended, so it won't respond until you reopen
           the app on that device and start playing something to reactivate it. This will recover
           automatically once it does.
-        </p>
+        </div>
       )}
 
-      <div style={{ marginTop: 16 }}>
-        <strong>Now playing:</strong>
-        <pre>
-          {current
-            ? `${roomState?.isPlaying ? 'playing' : 'paused'} — ${current.track.title} by ${current.track.artist}`
-            : 'nothing yet — add a track and start playback'}
-        </pre>
+      <div className="card now-playing">
+        <span className="section-label">Now playing</span>
+        <div className="now-playing-track">
+          {current ? (
+            <>
+              <strong>{current.track.title}</strong>
+              <span className="muted"> — {current.track.artist}</span>
+              <span className={`status-pill ${roomState?.isPlaying ? 'status-playing' : 'status-paused'}`}>
+                {roomState?.isPlaying ? 'Playing' : 'Paused'}
+              </span>
+            </>
+          ) : (
+            <span className="muted">Nothing yet — add a track below and press play.</span>
+          )}
+        </div>
         <div className="controls-row">
-          <button type="button" onClick={roomState?.isPlaying ? pause : resume} disabled={!current}>
+          <button type="button" className="primary" onClick={roomState?.isPlaying ? pause : resume} disabled={!current}>
             {roomState?.isPlaying ? 'Pause' : 'Resume'}
           </button>
           <button type="button" onClick={skipNext} disabled={!roomState || roomState.currentIndex + 1 >= roomState.queue.length}>
@@ -107,16 +115,11 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
         </div>
       </div>
 
-      <div style={{ marginTop: 16 }}>
-        <strong>Search tracks ({adapter.platform === 'spotify' ? 'Spotify' : 'Apple Music'} catalog)</strong>
-        <input
-          style={{ marginTop: 4 }}
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Search by title, artist..."
-        />
-        {searching && <p>Searching…</p>}
-        <ul style={{ listStyle: 'none', padding: 0, marginTop: 8 }}>
+      <div className="card">
+        <span className="section-label">Search ({adapter.platform === 'spotify' ? 'Spotify' : 'Apple Music'} catalog)</span>
+        <input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search by title, artist..." />
+        {searching && <p className="muted">Searching…</p>}
+        <ul className="track-list">
           {searchResults.map((track) => (
             <li key={track.platformId} className="search-result-row">
               {track.artworkUrl && <img src={track.artworkUrl} alt="" width={32} height={32} />}
@@ -137,27 +140,42 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
         </ul>
       </div>
 
-      <div style={{ marginTop: 16 }}>
-        <strong>Queue:</strong>
-        <ol>
+      <div className="card">
+        <span className="section-label">Queue</span>
+        <ol className="track-list queue-list">
           {roomState?.queue.map((item, i) => (
-            <li key={item.id} style={{ fontWeight: i === roomState.currentIndex ? 'bold' : 'normal' }}>
-              {item.track.title} — {item.track.artist}{' '}
-              {i !== roomState.currentIndex && (
-                <button type="button" onClick={() => gotoIndex(i)}>
-                  Play
+            <li key={item.id} className={i === roomState.currentIndex ? 'queue-row current' : 'queue-row'}>
+              <span>
+                {item.track.title} — {item.track.artist}
+              </span>
+              <div className="queue-row-actions">
+                {i !== roomState.currentIndex && (
+                  <button type="button" onClick={() => gotoIndex(i)}>
+                    Play
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label={`Remove "${item.track.title}" from queue`}
+                  onClick={() => {
+                    removeFromQueue(item.id)
+                    say(`Removed "${item.track.title}" from the queue`)
+                  }}
+                >
+                  ✕
                 </button>
-              )}
+              </div>
             </li>
           ))}
         </ol>
-        {roomState && roomState.queue.length === 0 && <p>Queue is empty — search above to add something.</p>}
+        {roomState && roomState.queue.length === 0 && <p className="muted">Queue is empty — search above to add something.</p>}
       </div>
 
-      <div style={{ marginTop: 16 }}>
-        <strong>Log:</strong>
+      <details className="log-panel">
+        <summary>Activity log</summary>
         <pre>{log.join('\n')}</pre>
-      </div>
+      </details>
     </section>
   )
 }
