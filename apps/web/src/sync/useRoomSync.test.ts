@@ -700,4 +700,53 @@ describe('useRoomSync', () => {
     expect(sentTypes).toContain('playback:pause')
     expect(sentTypes).not.toContain('playback:goto')
   })
+
+  it(
+    'auto-advances to a newly-added song after pausing at the end of the queue, with no manual resume ' +
+      'needed — nextPollDelay keeps polling (just at SLOW_POLL_MS) while paused, and the reporter block\'s ' +
+      "trackEnded check isn't gated on isPlaying, so it naturally re-fires once queue.length grows past " +
+      'the still-“ended” current track',
+    async () => {
+      const adapter = createFakeAdapter({
+        // Device stays sitting at/near the end, exactly where it was when it
+        // paused — nothing about its own state changes on its own.
+        getState: vi
+          .fn()
+          .mockResolvedValue(makePlaybackState({ isPlaying: false, positionMs: 199_800, durationMs: 200_000, platformId: 'spotify:track:a' })),
+      })
+      const fake = createFakeConnection()
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      const trackA = makeQueueItem('a', { track: makeTrack({ platformIds: { spotify: 'spotify:track:a' } }) })
+      const pausedAtEnd = makeState({
+        currentIndex: 0,
+        isPlaying: false,
+        positionMs: 199_800,
+        updatedAt: Date.now(),
+        queue: [trackA],
+      })
+
+      await act(async () => {
+        fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: pausedAtEnd })
+      })
+
+      // Someone adds a second song while the room sits paused at the end —
+      // simulates the room:sync a queue:add broadcast would produce.
+      const trackB = makeQueueItem('b', { track: makeTrack({ platformIds: { spotify: 'spotify:track:b' } }) })
+      await act(async () => {
+        fake.emit({ type: 'room:sync', state: { ...pausedAtEnd, queue: [trackA, trackB] } })
+      })
+
+      // Paused, so polling continues at SLOW_POLL_MS rather than stopping.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000)
+      })
+
+      const gotoCalls = (fake.conn.send as Mock).mock.calls.filter((c) => (c[0] as RelayEvent).type === 'playback:goto')
+      expect(gotoCalls.length).toBe(1)
+      expect((gotoCalls[0][0] as { index: number }).index).toBe(1)
+    },
+  )
 })
