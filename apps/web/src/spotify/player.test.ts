@@ -51,7 +51,7 @@ describe('play', () => {
   )
 })
 
-describe('pause / seek', () => {
+describe('pause', () => {
   let fetchMock: Mock
 
   beforeEach(() => {
@@ -63,15 +63,34 @@ describe('pause / seek', () => {
     vi.unstubAllGlobals()
   })
 
-  it('pause does not transfer playback first (pausing an inactive device is a no-op either way)', async () => {
+  it('does not transfer playback first (pausing an inactive device is a no-op either way)', async () => {
     await pause('token', 'device1')
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(fetchMock.mock.calls[0][0]).toContain('/me/player/pause')
   })
+})
 
-  it('seek does not transfer playback first', async () => {
-    await seek('token', 'device1', 1000)
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(fetchMock.mock.calls[0][0]).toContain('/me/player/seek')
+describe('seek', () => {
+  let fetchMock: Mock
+
+  beforeEach(() => {
+    fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetchMock)
   })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it(
+    'transfers playback first — a device can drop active status sometime after a ' +
+      'successful resume, and seeking a no-longer-active device is as silent a no-op as playing one',
+    async () => {
+      await seek('token', 'device1', 1000)
+
+      const urls = fetchMock.mock.calls.map((call) => call[0] as string)
+      expect(urls[0]).toBe(TRANSFER_URL)
+      expect(urls[1]).toContain('/me/player/seek')
+    },
+  )
 })

@@ -121,8 +121,18 @@ export async function skipNext(accessToken: string, deviceId: string): Promise<v
   await spotifyFetch(accessToken, `/me/player/next?device_id=${deviceId}`, { method: 'POST' })
 }
 
-/** Seeks within the currently playing track — cheaper than reissuing play() when only position has drifted. */
+/**
+ * Seeks within the currently playing track — cheaper than reissuing play()
+ * when only position has drifted. Also transfers first: the assumption that
+ * "we only reach seek() once play/pause already agree, so the device must
+ * already be active" turned out to be false in practice — a device can drop
+ * active status sometime *after* a successful resume (a rate-limited stretch
+ * right before repeated large, barely-shrinking drift corrections is what
+ * surfaced this), and seeking a no-longer-active device is exactly as silent
+ * a no-op as playing one was.
+ */
 export async function seek(accessToken: string, deviceId: string, positionMs: number): Promise<void> {
+  await transferPlayback(accessToken, deviceId)
   const params = new URLSearchParams({ position_ms: String(Math.round(positionMs)), device_id: deviceId })
   await spotifyFetch(accessToken, `/me/player/seek?${params.toString()}`, { method: 'PUT' })
 }
