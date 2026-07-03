@@ -8,10 +8,12 @@
   "scripts": {
     "dev:relay": "npm run dev -w apps/relay",
     "dev:web": "npm run dev -w apps/web",
+    "dev:mobile": "npm run start -w apps/mobile",
     "build": "npm run build -w packages/shared && npm run build -w apps/relay && npm run build -w apps/web",
     "test": "npm run test -w apps/relay && npm run test -w apps/web"
   },
   "allowScripts": {
-    "esbuild@0.28.1": true
+    "esbuild@0.28.1": true,
+    "@lomray/react-native-apple-music@1.4.0": true
   }
 }

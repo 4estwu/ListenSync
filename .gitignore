@@ -10,3 +10,12 @@ recovery-codes.txt
 .DS_Store
 .vite/
 .claude/settings.local.json
+
+# Expo/React Native (apps/mobile)
+.expo/
+apps/mobile/ios/
+apps/mobile/android/
+*.jks
+*.p12
+*.key
+*.mobileprovision
