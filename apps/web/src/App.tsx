@@ -100,6 +100,21 @@ function App() {
       const list = await getDevices(accessToken)
       setSpotifyAuthError(null)
       setDevices(list)
+      // A real click carries the user gesture browsers require to create the
+      // Web Playback SDK's DRM/EME session — retry it here in case the
+      // earlier automatic attempt (on page load, no gesture available on a
+      // silent auto-rejoin) failed. connectWebPlaybackDevice() no-ops if
+      // already connected, and no longer caches a failure forever, so this
+      // is a cheap, safe call to make on every refresh.
+      if (!webPlaybackDeviceIdRef.current) {
+        connectWebPlaybackDevice(getSpotifyAccessToken)
+          .then((id) => {
+            setWebPlaybackDeviceId(id)
+            if (!userPickedDeviceRef.current) setDeviceId(id)
+            setWebPlaybackError(null)
+          })
+          .catch((err: Error) => setWebPlaybackError(err.message))
+      }
       if (userPickedDeviceRef.current) return
       // Prefer this tab's own Web Playback SDK device over any external one:
       // it needs no pre-existing Spotify session anywhere else, which is the
