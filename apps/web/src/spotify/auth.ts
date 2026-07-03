@@ -5,13 +5,22 @@ const REDIRECT_URI = import.meta.env.VITE_SPOTIFY_REDIRECT_URI as string
 const TOKEN_KEY = 'spotify_token'
 const PENDING_ROOM_KEY = 'spotify_pending_room'
 
-// user-read-playback-state / user-modify-playback-state: read/control an existing
-// Spotify Connect device. Not requesting `streaming` since we're not running an
-// in-browser Web Playback SDK device yet.
+// user-read-playback-state / user-modify-playback-state / user-read-currently-playing:
+// read/control an existing Spotify Connect device (external or in-tab).
+// streaming / user-read-email / user-read-private: required for the Web
+// Playback SDK specifically — without `streaming`, the token can't fetch
+// Widevine DRM licenses. The SDK still authorizes and starts buffering
+// without it, so this was easy to miss: playback plays through the initial
+// ~10s buffer, then the next license request 403s and audio dies right at
+// that boundary — indistinguishable from a genuine SDK/browser bug unless
+// you're specifically watching the network tab for widevine-license calls.
 const SCOPES = [
   'user-read-playback-state',
   'user-modify-playback-state',
   'user-read-currently-playing',
+  'streaming',
+  'user-read-email',
+  'user-read-private',
 ].join(' ')
 
 export interface SpotifyToken {
