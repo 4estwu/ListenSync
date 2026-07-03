@@ -347,8 +347,10 @@ function App() {
           <h1>Pick a playback device</h1>
           <p style={{ opacity: 0.75, maxWidth: 420, textAlign: 'center' }}>
             This browser tab will be used automatically once it's ready — no separate Spotify session needed.
-            On mobile, Spotify doesn't allow that, so tap below instead: just opening the app is enough, it
-            shows up here on its own as soon as you switch back — no need to play anything first.
+            On mobile, Spotify doesn't allow that, so tap below instead: once there, tap play on anything —
+            Spotify only shows up as an available device once it's actually started playing something (opening
+            the app alone isn't enough). Feel free to pause right away — it'll show up here on its own as soon
+            as you switch back.
           </p>
           <a className="button-link" href="spotify:" target="_blank" rel="noreferrer">
             Open Spotify app
@@ -377,8 +379,8 @@ function App() {
           </select>
           {devices.length === 0 && !webPlaybackDeviceId && !spotifyAuthError && (
             <p style={{ opacity: 0.7 }}>
-              Setting up this tab as a device… if that fails (e.g. no Premium), open Spotify elsewhere — it'll
-              show up here automatically.
+              Setting up this tab as a device… if that fails (e.g. no Premium), open Spotify elsewhere and tap
+              play on anything — it'll show up here automatically once it does.
             </p>
           )}
           {webPlaybackError && (
