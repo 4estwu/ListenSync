@@ -29,6 +29,15 @@ function isPlatform(value: string | null): value is Platform {
   return value === 'spotify' || value === 'apple'
 }
 
+// Desktop already defaults to in-tab playback via the Web Playback SDK — no
+// external app needed there at all, so auto-launching the desktop Spotify
+// app right after login would be an unwanted popup, not a convenience. Only
+// mobile genuinely needs "open Spotify somewhere" (Spotify blocks the SDK on
+// every mobile browser), so that's the only case this applies to.
+function isLikelyMobile(): boolean {
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+}
+
 function App() {
   const [platform, setPlatformState] = useState<Platform | null>(() => {
     const stored = localStorage.getItem(LAST_PLATFORM_KEY)
@@ -148,6 +157,15 @@ function App() {
           setSpotifyToken(exchanged)
           const pending = consumePendingRoom()
           if (pending) setRoomId(pending)
+          // `exchanged` is only truthy right here — the moment a fresh OAuth
+          // redirect just completed, not a token restored from a previous
+          // visit. Chaining this into the same motion as finishing login is
+          // what makes "log in" and "open the app" feel like one action
+          // instead of two separate steps the user has to notice and click
+          // in sequence. Navigating to an unregistered custom scheme like
+          // this is a safe no-op if Spotify isn't installed — nothing
+          // visibly happens, the page just stays put.
+          if (isLikelyMobile()) window.location.href = 'spotify:'
           return
         }
         const stored = getStoredToken()
