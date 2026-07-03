@@ -45,8 +45,12 @@ state over WebSockets, so it can't run as a serverless/edge function). Frontend
 
 1. **Render**: New → Blueprint → point at this GitHub repo → it reads
    `render.yaml` at the repo root → fill in `APPLE_TEAM_ID`, `APPLE_KEY_ID`,
-   `APPLE_PRIVATE_KEY` (paste the `.p8` file's contents) in Render's dashboard
-   → deploy. Note the assigned URL, e.g. `https://spotifyapple-relay.onrender.com`.
+   `APPLE_PRIVATE_KEY_BASE64` in Render's dashboard → deploy. Render's env var
+   field is a single-line input that strips real newlines on paste, so paste
+   base64 of the `.p8` file's contents, not the raw PEM — generate it with
+   `[Convert]::ToBase64String([IO.File]::ReadAllBytes("AuthKey_XXXX.p8"))` in
+   PowerShell (or `base64 -i AuthKey_XXXX.p8 | tr -d '\n'` on macOS/Linux).
+   Note the assigned URL, e.g. `https://spotifyapple-relay.onrender.com`.
 2. **Vercel**: New Project → import this repo (it reads `vercel.json` at the
    repo root). Note the assigned domain, e.g. `https://<app>.vercel.app`, then
    set three env vars in the Vercel project settings:

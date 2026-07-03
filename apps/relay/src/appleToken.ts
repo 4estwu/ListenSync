@@ -17,6 +17,14 @@ function normalizePrivateKey(raw: string): string {
 }
 
 function readPrivateKey(): string {
+  // Preferred for cloud hosts: base64-encoded .p8 contents in a single-line
+  // env var. Some hosts' env var fields are plain single-line <input>s that
+  // silently strip newlines on paste — normalizePrivateKey can only fix
+  // *escaped* newlines, not ones that were dropped entirely, so a raw
+  // multi-line paste is not reliable. Base64 has no newlines to lose.
+  const base64 = process.env.APPLE_PRIVATE_KEY_BASE64;
+  if (base64) return Buffer.from(base64, "base64").toString("utf8");
+
   const inline = process.env.APPLE_PRIVATE_KEY;
   if (inline) return normalizePrivateKey(inline);
 
@@ -24,7 +32,7 @@ function readPrivateKey(): string {
   if (keyPath) return readFileSync(path.resolve(ROOT_DIR, keyPath), "utf8");
 
   throw new Error(
-    "Apple developer credentials are not configured (APPLE_PRIVATE_KEY or APPLE_PRIVATE_KEY_PATH)",
+    "Apple developer credentials are not configured (APPLE_PRIVATE_KEY_BASE64, APPLE_PRIVATE_KEY, or APPLE_PRIVATE_KEY_PATH)",
   );
 }
 

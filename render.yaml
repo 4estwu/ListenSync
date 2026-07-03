@@ -11,5 +11,5 @@ services:
         sync: false
       - key: APPLE_KEY_ID
         sync: false
-      - key: APPLE_PRIVATE_KEY
+      - key: APPLE_PRIVATE_KEY_BASE64
         sync: false
