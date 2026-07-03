@@ -206,4 +206,44 @@ describe('useRoomSync', () => {
     })
     expect(adapter.play).toHaveBeenCalledTimes(1)
   })
+
+  it(
+    "reporter does not auto-advance/pause based on getState() data for a different track than the one " +
+      'canonically current (regression: a rate-limited poll returning stale cached data from the ' +
+      'previous track — which happened to be near its own end — caused the newly-switched-to track ' +
+      'to get paused seconds after it started)',
+    async () => {
+      // platformId deliberately does not match the queued track's URI
+      // (spotify:track:abc), simulating stale/mismatched getState() data,
+      // while positionMs/durationMs alone would look like "track ended" if
+      // naively trusted.
+      const adapter = createFakeAdapter({
+        getState: vi
+          .fn()
+          .mockResolvedValue(makePlaybackState({ isPlaying: true, positionMs: 199_500, durationMs: 200_000, platformId: 'spotify:track:STALE' })),
+      })
+      const fake = createFakeConnection()
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      await act(async () => {
+        fake.emit({
+          type: 'hello',
+          clientId: 'me',
+          isHost: true,
+          state: makeState({ currentIndex: 0, isPlaying: true, queue: [makeQueueItem('a')] }),
+        })
+      })
+
+      // Let the periodic poll (which drives the reporter block) run.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000)
+      })
+
+      const sentTypes = (fake.conn.send as Mock).mock.calls.map((call) => (call[0] as RelayEvent).type)
+      expect(sentTypes).not.toContain('playback:pause')
+      expect(sentTypes).not.toContain('playback:goto')
+    },
+  )
 })

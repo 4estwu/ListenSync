@@ -77,12 +77,15 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
    * against for the periodic poll.
    */
   const reconcile = useCallback(
-    async (state: RoomState, opts?: { skipCooldown?: boolean }): Promise<AdapterPlaybackState | null> => {
+    async (
+      state: RoomState,
+      opts?: { skipCooldown?: boolean },
+    ): Promise<{ playback: AdapterPlaybackState | null; expectedUri: string | null }> => {
       const playback = await adapter.getState().catch((err: Error) => {
         onLog(`Sync: playback poll error — ${err.message}`)
         return null
       })
-      if (!playback) return null
+      if (!playback) return { playback: null, expectedUri: null }
       lastKnownPositionRef.current = playback.positionMs
 
       const current = state.currentIndex >= 0 ? state.queue[state.currentIndex] : null
@@ -105,7 +108,7 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
           onLog(`Sync: couldn't find "${current.track.title}" by ${current.track.artist} on ${adapter.platform} (no ISRC/search match)`)
           lastUnresolvedItemIdRef.current = current.id
         }
-        return playback
+        return { playback, expectedUri: null }
       }
 
       const withinCooldown = !opts?.skipCooldown && Date.now() - lastCorrectionAtRef.current < CORRECTION_COOLDOWN_MS
@@ -146,7 +149,7 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
         }
       }
 
-      return playback
+      return { playback, expectedUri }
     },
     [adapter, onLog],
   )
@@ -218,14 +221,26 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
       // try/finally guarantees scheduling continues no matter what happens
       // above it.
       try {
-        const playback = await reconcile(state)
+        const { playback, expectedUri } = await reconcile(state)
 
         // Reporter-only: report ground-truth position, and auto-advance the
         // shared queue when this client's own track finishes. Only once room
-        // playback has actually started (currentIndex >= 0) — otherwise
-        // leftover playback from before joining the room would spuriously
-        // trigger an advance.
-        if (isHostRef.current && state.currentIndex >= 0 && playback?.durationMs != null) {
+        // playback has actually started (currentIndex >= 0), AND only when
+        // playback.platformId actually matches the track that's canonically
+        // supposed to be current — a rate-limited getState() can return
+        // *cached data from a previous track* (see the adapter's backoff
+        // handling), and trusting a stale duration/position pairing for a
+        // track-end check caused a real bug: a just-switched-to track got
+        // paused seconds in because the leftover position/duration from the
+        // *previous* track (which happened to be near its own end) looked
+        // like "track ended" for the new one.
+        if (
+          isHostRef.current &&
+          state.currentIndex >= 0 &&
+          playback?.durationMs != null &&
+          expectedUri &&
+          playback.platformId === expectedUri
+        ) {
           const trackEnded = playback.durationMs > 0 && playback.positionMs >= playback.durationMs - TRACK_END_EPSILON_MS
           if (trackEnded) {
             const nextIndex = state.currentIndex + 1
