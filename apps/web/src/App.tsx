@@ -171,6 +171,23 @@ function App() {
     return () => clearInterval(handle)
   }, [platform, spotifyToken, roomId, refreshDevices])
 
+  // Immediate refresh the moment the tab regains focus — the "Open Spotify
+  // app" link below backgrounds this tab, and the natural moment to check
+  // again is the instant the user comes back, not whenever the 4s poll
+  // happens to land next.
+  useEffect(() => {
+    if (platform !== 'spotify' || !spotifyToken || roomId) return
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refreshDevices()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
+    }
+  }, [platform, spotifyToken, roomId, refreshDevices])
+
   // --- Apple Music ---
   const [musicKitInstance, setMusicKitInstance] = useState<MusicKit.MusicKitInstance | null>(null)
   const [appleAuthorizing, setAppleAuthorizing] = useState(false)
@@ -251,8 +268,8 @@ function App() {
           <h1>Pick a playback device</h1>
           <p style={{ opacity: 0.75, maxWidth: 420, textAlign: 'center' }}>
             This browser tab will be used automatically once it's ready — no separate Spotify session needed.
-            On mobile, Spotify doesn't allow that, so pick a device below instead: open Spotify there and
-            start playing anything (even paused) so it shows up here.
+            On mobile, Spotify doesn't allow that, so tap below instead: just opening the app is enough, it
+            shows up here on its own as soon as you switch back — no need to play anything first.
           </p>
           <a className="button-link" href="spotify:" target="_blank" rel="noreferrer">
             Open Spotify app

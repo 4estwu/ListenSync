@@ -321,4 +321,74 @@ describe('useRoomSync', () => {
     // undefined just means mirroring is skipped, not a crash for everything else.
     expect(adapter.play).toHaveBeenCalledWith('apple:track:a', expect.any(Number))
   })
+
+  it(
+    're-mirrors the queue on every fresh "hello" (reconnect), not just on a track switch — a reconnect ' +
+      "landing mid-track has no switch to trigger it otherwise, leaving a possibly-stale mirror as the only copy",
+    async () => {
+      const enqueueUpcoming = vi.fn().mockResolvedValue(undefined)
+      // Device already on the right track (matches expectedUri from the
+      // start) so reconcile()'s own track-switch path — which separately
+      // triggers a mirror — doesn't fire here; isolates this test to just
+      // the "hello" handler's own mirror call.
+      const adapter = createFakeAdapter({
+        enqueueUpcoming,
+        getState: vi.fn().mockResolvedValue(makePlaybackState({ isPlaying: true, platformId: 'spotify:track:a' })),
+      })
+      const fake = createFakeConnection()
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      const queue = [
+        makeQueueItem('a', { track: makeTrack({ platformIds: { spotify: 'spotify:track:a' } }) }),
+        makeQueueItem('b', { track: makeTrack({ platformIds: { spotify: 'spotify:track:b' } }) }),
+      ]
+      const state = makeState({ currentIndex: 0, isPlaying: true, queue })
+
+      await act(async () => {
+        fake.emit({ type: 'hello', clientId: 'me', isHost: true, state })
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(enqueueUpcoming).toHaveBeenCalledTimes(1)
+
+      // Simulates this tab reconnecting (e.g. after being backgrounded) — a
+      // second "hello" for the same still-in-progress track, no index change.
+      await act(async () => {
+        fake.emit({ type: 'hello', clientId: 'me-2', isHost: true, state })
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(enqueueUpcoming).toHaveBeenCalledTimes(2)
+    },
+  )
+
+  it('seekTo sends playback:resume (preserving isPlaying=true) when currently playing', async () => {
+    const adapter = createFakeAdapter()
+    const fake = createFakeConnection()
+    vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+    const { result } = renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+    await act(async () => {
+      fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: makeState({ isPlaying: true }) })
+    })
+    act(() => result.current.seekTo(42_000))
+
+    expect(fake.conn.send).toHaveBeenCalledWith({ type: 'playback:resume', positionMs: 42_000 })
+  })
+
+  it('seekTo sends playback:pause (preserving isPlaying=false) when currently paused, and clamps negative positions to 0', async () => {
+    const adapter = createFakeAdapter()
+    const fake = createFakeConnection()
+    vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+    const { result } = renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+    await act(async () => {
+      fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: makeState({ isPlaying: false }) })
+    })
+    act(() => result.current.seekTo(-5000))
+
+    expect(fake.conn.send).toHaveBeenCalledWith({ type: 'playback:pause', positionMs: 0 })
+  })
 })

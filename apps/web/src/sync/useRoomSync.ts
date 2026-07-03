@@ -45,6 +45,7 @@ export interface RoomSync {
   skipNext: () => void
   pause: () => void
   resume: () => void
+  seekTo: (positionMs: number) => void
 }
 
 /** Distance in ms to the current track's start or end, using only local canonical state — no API call needed to decide how urgently to poll. */
@@ -129,6 +130,17 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
     },
     [adapter, onLog],
   )
+  // Referenced from the WS "hello" handler below so a fresh connection (first
+  // join, or reconnecting after this tab was backgrounded/killed) re-mirrors
+  // the queue immediately — the previous mirror only fired on a track
+  // *switch*, so a reconnect landing mid-track (no switch to trigger it)
+  // would otherwise leave whatever mirroring had happened before this tab
+  // went away as the only copy, possibly already stale or gone if the
+  // Spotify app's own session also reset in the meantime.
+  const mirrorUpcomingQueueRef = useRef(mirrorUpcomingQueue)
+  useEffect(() => {
+    mirrorUpcomingQueueRef.current = mirrorUpcomingQueue
+  }, [mirrorUpcomingQueue])
 
   /**
    * Polls this client's own playback once and reconciles it toward `state`.
@@ -271,6 +283,7 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
         setRoomState(event.state)
         roomStateRef.current = event.state
         void reconcileRef.current(event.state, { skipCooldown: true })
+        void mirrorUpcomingQueueRef.current(event.state)
       } else if (event.type === 'room:sync') {
         const prev = roomStateRef.current
         setRoomState(event.state)
@@ -398,5 +411,18 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
     connRef.current?.send({ type: 'playback:resume', positionMs: lastKnownPositionRef.current })
   }, [])
 
-  return { clientId, isHost, roomState, deviceError, addToQueue, removeFromQueue, gotoIndex, skipNext, pause, resume }
+  // Reuses playback:pause/playback:resume rather than a dedicated seek event
+  // — both already carry a positionMs and apply it via setPosition regardless
+  // of whether isPlaying is actually changing, so sending the current
+  // isPlaying state back with a new position works as a general seek with no
+  // protocol changes needed. Powers both the progress bar (click-to-seek) and
+  // the ±15s rewind/forward buttons.
+  const seekTo = useCallback((positionMs: number) => {
+    const state = roomStateRef.current
+    if (!state) return
+    const clamped = Math.max(0, positionMs)
+    connRef.current?.send({ type: state.isPlaying ? 'playback:resume' : 'playback:pause', positionMs: clamped })
+  }, [])
+
+  return { clientId, isHost, roomState, deviceError, addToQueue, removeFromQueue, gotoIndex, skipNext, pause, resume, seekTo }
 }

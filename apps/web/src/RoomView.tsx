@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Track } from '@spotifyapple/shared'
 import type { AdapterTrackResult, PlaybackAdapter } from './platform/adapter'
 import { useRoomSync } from './sync/useRoomSync'
+
+const SEEK_STEP_MS = 15_000
 
 function toSharedTrack(adapter: PlaybackAdapter, result: AdapterTrackResult): Track {
   return {
@@ -11,6 +13,13 @@ function toSharedTrack(adapter: PlaybackAdapter, result: AdapterTrackResult): Tr
     isrc: result.isrc,
     platformIds: { [adapter.platform]: result.platformId },
   }
+}
+
+function formatTime(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
 }
 
 interface RoomViewProps {
@@ -29,11 +38,23 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
     setLog((prev) => [`${new Date().toLocaleTimeString()}  ${line}`, ...prev].slice(0, 30))
   }, [])
 
-  const { clientId, roomState, deviceError, addToQueue, removeFromQueue, gotoIndex, skipNext, pause, resume } = useRoomSync({
+  const { clientId, roomState, deviceError, addToQueue, removeFromQueue, gotoIndex, skipNext, pause, resume, seekTo } = useRoomSync({
     roomId,
     adapter,
     onLog: say,
   })
+
+  // Re-render periodically so the progress bar/time actually animate between
+  // syncs, instead of only jumping on the next real correction. Only runs
+  // while playing — the displayed position is static otherwise.
+  const [, forceTick] = useState(0)
+  useEffect(() => {
+    if (!roomState?.isPlaying) return
+    const handle = setInterval(() => forceTick((t) => t + 1), 250)
+    return () => clearInterval(handle)
+  }, [roomState?.isPlaying])
+
+  const progressBarRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (searchQuery.trim().length < 2) {
@@ -66,6 +87,30 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
   }
 
   const current = roomState && roomState.currentIndex >= 0 ? roomState.queue[roomState.currentIndex] : null
+
+  // Canonical position (roomState.positionMs) is a snapshot as of updatedAt —
+  // interpolated forward by elapsed real time while playing, same math the
+  // sync engine itself uses, and clamped to the track's duration so it never
+  // visibly overshoots at the very end.
+  const displayedPositionMs =
+    current && roomState
+      ? Math.min(
+          current.track.durationMs,
+          roomState.isPlaying ? roomState.positionMs + (Date.now() - roomState.updatedAt) : roomState.positionMs,
+        )
+      : 0
+
+  const handleProgressBarClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!current || !progressBarRef.current) return
+    const rect = progressBarRef.current.getBoundingClientRect()
+    const fraction = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
+    seekTo(fraction * current.track.durationMs)
+  }
+
+  const seekBy = (deltaMs: number) => {
+    if (!current) return
+    seekTo(Math.min(current.track.durationMs, Math.max(0, displayedPositionMs + deltaMs)))
+  }
 
   return (
     <section className="room-view">
@@ -105,9 +150,26 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
             <span className="muted">Nothing yet — add a track below and press play.</span>
           )}
         </div>
+        {current && (
+          <div className="progress-section">
+            <div className="progress-bar" ref={progressBarRef} onClick={handleProgressBarClick}>
+              <div className="progress-fill" style={{ width: `${(displayedPositionMs / current.track.durationMs) * 100}%` }} />
+            </div>
+            <div className="progress-times">
+              <span>{formatTime(displayedPositionMs)}</span>
+              <span>{formatTime(current.track.durationMs)}</span>
+            </div>
+          </div>
+        )}
         <div className="controls-row">
+          <button type="button" onClick={() => seekBy(-SEEK_STEP_MS)} disabled={!current} aria-label="Rewind 15 seconds">
+            ⟲ 15s
+          </button>
           <button type="button" className="primary" onClick={roomState?.isPlaying ? pause : resume} disabled={!current}>
             {roomState?.isPlaying ? 'Pause' : 'Resume'}
+          </button>
+          <button type="button" onClick={() => seekBy(SEEK_STEP_MS)} disabled={!current} aria-label="Forward 15 seconds">
+            15s ⟳
           </button>
           <button type="button" onClick={skipNext} disabled={!roomState || roomState.currentIndex + 1 >= roomState.queue.length}>
             Skip
