@@ -38,6 +38,11 @@ function broadcastSync(room: Room): void {
 }
 
 const httpServer = createServer((req, res) => {
+  if (req.method === "GET" && req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("ok");
+    return;
+  }
   if (req.method === "GET" && req.url === "/apple-developer-token") {
     res.setHeader("Access-Control-Allow-Origin", "*"); // local-dev-only scope, same trust level as the rest of .env
     try {

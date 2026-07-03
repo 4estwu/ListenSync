@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: spotifyapple-relay
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build -w packages/shared && npm run build -w apps/relay
+    startCommand: npm run start -w apps/relay
+    healthCheckPath: /health
+    envVars:
+      - key: APPLE_TEAM_ID
+        sync: false
+      - key: APPLE_KEY_ID
+        sync: false
+      - key: APPLE_PRIVATE_KEY
+        sync: false

@@ -9,19 +9,35 @@ const TOKEN_LIFETIME_SECONDS = 60 * 60 * 12; // short-lived; Apple allows up to 
 
 let cached: { token: string; expiresAt: number } | null = null;
 
+// Cloud env-var UIs vary in whether they preserve real newlines in a
+// multi-line value or require them escaped as literal "\n" — normalize both
+// so the same APPLE_PRIVATE_KEY value works regardless of host.
+function normalizePrivateKey(raw: string): string {
+  return raw.includes("\\n") ? raw.replace(/\\n/g, "\n") : raw;
+}
+
+function readPrivateKey(): string {
+  const inline = process.env.APPLE_PRIVATE_KEY;
+  if (inline) return normalizePrivateKey(inline);
+
+  const keyPath = process.env.APPLE_PRIVATE_KEY_PATH;
+  if (keyPath) return readFileSync(path.resolve(ROOT_DIR, keyPath), "utf8");
+
+  throw new Error(
+    "Apple developer credentials are not configured (APPLE_PRIVATE_KEY or APPLE_PRIVATE_KEY_PATH)",
+  );
+}
+
 export function getAppleDeveloperToken(): string {
   if (cached && Date.now() < cached.expiresAt) return cached.token;
 
   const teamId = process.env.APPLE_TEAM_ID;
   const keyId = process.env.APPLE_KEY_ID;
-  const keyPath = process.env.APPLE_PRIVATE_KEY_PATH;
-  if (!teamId || !keyId || !keyPath) {
-    throw new Error(
-      "Apple developer credentials are not configured (APPLE_TEAM_ID / APPLE_KEY_ID / APPLE_PRIVATE_KEY_PATH)",
-    );
+  if (!teamId || !keyId) {
+    throw new Error("Apple developer credentials are not configured (APPLE_TEAM_ID / APPLE_KEY_ID)");
   }
 
-  const privateKey = readFileSync(path.resolve(ROOT_DIR, keyPath), "utf8");
+  const privateKey = readPrivateKey();
   const token = jwt.sign({}, privateKey, {
     algorithm: "ES256",
     issuer: teamId,
