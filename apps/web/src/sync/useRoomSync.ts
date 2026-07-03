@@ -40,6 +40,13 @@ const LATENCY_EMA_WEIGHT = 0.3 // how much each new measurement moves the rollin
 // separate API call, and the goal is resilience against this tab dying, not
 // exhaustively replicating a long queue.
 const MAX_QUEUE_MIRROR = 10
+// Safety net for the reporter's auto-advance pending guard (see
+// autoAdvancePendingRef below): a generous margin past any normal WS round
+// trip. If no confirming room:sync shows up within this window, assume the
+// goto/pause was lost — e.g. sent during a connectivity gap (a subway
+// tunnel, a brief WS reconnect) — and allow a retry, rather than leaving
+// auto-advance stuck for the rest of the session.
+const AUTO_ADVANCE_PENDING_TIMEOUT_MS = 8000
 
 interface UseRoomSyncArgs {
   roomId: string
@@ -97,7 +104,17 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
   // the same goto. The relay now ignores a redundant same-index goto too
   // (defense in depth), but suppressing the resend here also avoids the
   // pointless extra network chatter.
+  //
+  // Cleared three ways: a confirming room:sync arrives (the normal case),
+  // conn.send() itself reports the message never left (socket wasn't open),
+  // or AUTO_ADVANCE_PENDING_TIMEOUT_MS elapses with no confirmation either
+  // way (autoAdvancePendingAtRef) — without that last one, a goto lost to a
+  // connectivity gap (sent successfully into a socket that then drops before
+  // the relay's broadcast comes back, or genuinely dropped mid-air) left
+  // this permanently true, silently disabling auto-advance for the rest of
+  // the session with no way to recover short of a manual skip.
   const autoAdvancePendingRef = useRef(false)
+  const autoAdvancePendingAtRef = useRef(0)
   const resolvedUriCacheRef = useRef(new Map<string, string | null>())
   const lastUnresolvedItemIdRef = useRef<string | null>(null)
   // Rolling estimate of how long a play()/seek() call takes from decision to
@@ -403,9 +420,11 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
         // paused seconds in because the leftover position/duration from the
         // *previous* track (which happened to be near its own end) looked
         // like "track ended" for the new one.
+        const autoAdvanceStillPending =
+          autoAdvancePendingRef.current && Date.now() - autoAdvancePendingAtRef.current < AUTO_ADVANCE_PENDING_TIMEOUT_MS
         if (
           isHostRef.current &&
-          !autoAdvancePendingRef.current &&
+          !autoAdvanceStillPending &&
           state.currentIndex >= 0 &&
           playback?.durationMs != null &&
           expectedUri &&
@@ -414,12 +433,16 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
           const trackEnded = playback.durationMs > 0 && playback.positionMs >= playback.durationMs - TRACK_END_EPSILON_MS
           if (trackEnded) {
             autoAdvancePendingRef.current = true
+            autoAdvancePendingAtRef.current = Date.now()
             const nextIndex = state.currentIndex + 1
-            if (nextIndex < state.queue.length) {
-              conn.send({ type: 'playback:goto', index: nextIndex })
-            } else {
-              conn.send({ type: 'playback:pause', positionMs: playback.positionMs })
-            }
+            const sent =
+              nextIndex < state.queue.length
+                ? conn.send({ type: 'playback:goto', index: nextIndex })
+                : conn.send({ type: 'playback:pause', positionMs: playback.positionMs })
+            // Definitely didn't go anywhere (socket wasn't open right now) —
+            // no reason to wait out the full timeout when we already know it
+            // failed; let the next tick try again immediately.
+            if (!sent) autoAdvancePendingRef.current = false
           } else {
             conn.send({ type: 'playback:report', positionMs: playback.positionMs })
           }

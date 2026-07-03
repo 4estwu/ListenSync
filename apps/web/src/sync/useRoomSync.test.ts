@@ -60,7 +60,11 @@ function createFakeAdapter(overrides: Partial<PlaybackAdapter> = {}): PlaybackAd
 function createFakeConnection() {
   let messageHandler: ((event: RelayEvent) => void) | null = null
   const conn: RelayConnection = {
-    send: vi.fn(),
+    // Defaults to the real send()'s successful-delivery return value — a
+    // bare vi.fn() returns undefined (falsy), which would silently exercise
+    // the "message didn't go anywhere" branch in every test using this
+    // helper without them realizing it.
+    send: vi.fn(() => true),
     onMessage: vi.fn((cb) => {
       messageHandler = cb
     }),
@@ -532,4 +536,103 @@ describe('useRoomSync', () => {
 
     vi.mocked(hasUserGesture).mockReturnValue(true)
   })
+
+  function nearEndState(overrides: Partial<RoomState> = {}) {
+    return makeState({
+      currentIndex: 0,
+      isPlaying: true,
+      positionMs: 199_500,
+      updatedAt: Date.now(),
+      queue: [makeQueueItem('a'), makeQueueItem('b')],
+      ...overrides,
+    })
+  }
+
+  it(
+    'recovers immediately when the auto-advance goto fails to send (e.g. mid connectivity gap), instead of ' +
+      "getting stuck for the rest of the session — regression: conn.send() used to silently no-op with no " +
+      'feedback, so the "pending" guard never cleared once a goto was lost this way',
+    async () => {
+      const adapter = createFakeAdapter({
+        getState: vi
+          .fn()
+          .mockResolvedValue(makePlaybackState({ isPlaying: true, positionMs: 199_500, durationMs: 200_000, platformId: 'spotify:track:abc' })),
+      })
+      const fake = createFakeConnection()
+      vi.mocked(fake.conn.send).mockReturnValue(false) // socket not open right now
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      await act(async () => {
+        fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: nearEndState() })
+      })
+
+      // The very first poll tick is always scheduled at SLOW_POLL_MS from
+      // mount, before any tick has run to notice the state is actually near
+      // a boundary — only ticks scheduled *after* that recompute the
+      // interval, landing on FAST_POLL_MS from then on.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000)
+      })
+      let gotoCalls = (fake.conn.send as Mock).mock.calls.filter((c) => (c[0] as RelayEvent).type === 'playback:goto')
+      expect(gotoCalls.length).toBe(1)
+
+      // Connectivity's back — the very next tick should retry immediately,
+      // not wait out the full stuck-detection timeout.
+      vi.mocked(fake.conn.send).mockReturnValue(true)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      gotoCalls = (fake.conn.send as Mock).mock.calls.filter((c) => (c[0] as RelayEvent).type === 'playback:goto')
+      expect(gotoCalls.length).toBe(2)
+    },
+  )
+
+  it(
+    'recovers via a timeout if a "successful" auto-advance goto is never confirmed by a room:sync ' +
+      '(e.g. the broadcast itself was lost) — same stuck-forever failure mode as a failed send, just ' +
+      'subtler since conn.send() itself reported success',
+    async () => {
+      const adapter = createFakeAdapter({
+        getState: vi
+          .fn()
+          .mockResolvedValue(makePlaybackState({ isPlaying: true, positionMs: 199_500, durationMs: 200_000, platformId: 'spotify:track:abc' })),
+      })
+      const fake = createFakeConnection() // send() defaults to reporting success
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      await act(async () => {
+        fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: nearEndState() })
+      })
+
+      // First tick is always at SLOW_POLL_MS from mount (see the previous
+      // test's comment) — this is when the pending goto is actually sent.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000)
+      })
+      let gotoCalls = (fake.conn.send as Mock).mock.calls.filter((c) => (c[0] as RelayEvent).type === 'playback:goto')
+      expect(gotoCalls.length).toBe(1)
+
+      // No confirming room:sync ever arrives. Well within the timeout
+      // window (3s elapsed since the pending goto), repeated polls should
+      // not resend.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000)
+      })
+      gotoCalls = (fake.conn.send as Mock).mock.calls.filter((c) => (c[0] as RelayEvent).type === 'playback:goto')
+      expect(gotoCalls.length).toBe(1)
+
+      // Past AUTO_ADVANCE_PENDING_TIMEOUT_MS (8s) since the pending goto was
+      // sent (3000 + 6000 = 9000ms elapsed since it was set), the next poll
+      // should retry rather than staying stuck forever.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6000)
+      })
+      gotoCalls = (fake.conn.send as Mock).mock.calls.filter((c) => (c[0] as RelayEvent).type === 'playback:goto')
+      expect(gotoCalls.length).toBe(2)
+    },
+  )
 })
