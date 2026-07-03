@@ -6,6 +6,7 @@ build/
 !.env.example
 *.p8
 *.log
+recovery-codes.txt
 .DS_Store
 .vite/
 .claude/settings.local.json

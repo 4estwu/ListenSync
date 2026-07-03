@@ -46,8 +46,15 @@ const httpServer = createServer((req, res) => {
   if (req.method === "GET" && req.url === "/apple-developer-token") {
     res.setHeader("Access-Control-Allow-Origin", "*"); // local-dev-only scope, same trust level as the rest of .env
     try {
+      // Compute the token before writeHead — if getAppleDeveloperToken()
+      // throws after headers are already sent, the catch block's own
+      // writeHead(500) throws ERR_HTTP_HEADERS_SENT (can't send headers
+      // twice), which is uncaught and crashes the whole process. This isn't
+      // hypothetical — it's what took the relay down in production the first
+      // time this route hit a real (mis)configured key.
+      const token = getAppleDeveloperToken();
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ token: getAppleDeveloperToken() }));
+      res.end(JSON.stringify({ token }));
     } catch (err) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: (err as Error).message }));
