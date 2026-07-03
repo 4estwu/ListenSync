@@ -68,7 +68,7 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
   const current = roomState && roomState.currentIndex >= 0 ? roomState.queue[roomState.currentIndex] : null
 
   return (
-    <section id="center" style={{ textAlign: 'left', maxWidth: 560, margin: '0 auto' }}>
+    <section className="room-view">
       <h1>Listening room {roomId}</h1>
       <p>
         Everyone here can search, queue, play, pause, and skip — it's a shared session, mixing Spotify and Apple
@@ -89,7 +89,7 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
             ? `${roomState?.isPlaying ? 'playing' : 'paused'} — ${current.track.title} by ${current.track.artist}`
             : 'nothing yet — add a track and start playback'}
         </pre>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div className="controls-row">
           <button type="button" onClick={roomState?.isPlaying ? pause : resume} disabled={!current}>
             {roomState?.isPlaying ? 'Pause' : 'Resume'}
           </button>
@@ -102,7 +102,7 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
       <div style={{ marginTop: 16 }}>
         <strong>Search tracks ({adapter.platform === 'spotify' ? 'Spotify' : 'Apple Music'} catalog)</strong>
         <input
-          style={{ width: '100%', marginTop: 4 }}
+          style={{ marginTop: 4 }}
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           placeholder="Search by title, artist..."
@@ -110,12 +110,9 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
         {searching && <p>Searching…</p>}
         <ul style={{ listStyle: 'none', padding: 0, marginTop: 8 }}>
           {searchResults.map((track) => (
-            <li
-              key={track.platformId}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px solid #333' }}
-            >
+            <li key={track.platformId} className="search-result-row">
               {track.artworkUrl && <img src={track.artworkUrl} alt="" width={32} height={32} />}
-              <span style={{ flex: 1 }}>
+              <span>
                 {track.title} — {track.artist}
               </span>
               <button
