@@ -35,17 +35,23 @@ interface TokenResponse {
   expires_in: number
 }
 
+// localStorage (not sessionStorage) deliberately — the refresh token is
+// long-lived, and the goal is to survive actually closing the browser/tab
+// (common on mobile — backgrounding an app can lead to it being killed and
+// reopened later), not just a same-tab reload. ensureFreshToken already
+// re-mints a new access token from the refresh token on every use, so a
+// stale cached access token here is never actually a problem.
 export function getStoredToken(): SpotifyToken | null {
-  const raw = sessionStorage.getItem(TOKEN_KEY)
+  const raw = localStorage.getItem(TOKEN_KEY)
   return raw ? (JSON.parse(raw) as SpotifyToken) : null
 }
 
 function storeToken(token: SpotifyToken): void {
-  sessionStorage.setItem(TOKEN_KEY, JSON.stringify(token))
+  localStorage.setItem(TOKEN_KEY, JSON.stringify(token))
 }
 
 export function logout(): void {
-  sessionStorage.removeItem(TOKEN_KEY)
+  localStorage.removeItem(TOKEN_KEY)
 }
 
 /** Reads and clears the room code stashed before an OAuth redirect (see `redirectToAuthorize`). */

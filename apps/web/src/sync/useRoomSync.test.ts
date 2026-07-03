@@ -275,4 +275,50 @@ describe('useRoomSync', () => {
       expect(result.current.deviceError).toBeNull()
     },
   )
+
+  it(
+    'mirrors the next few upcoming tracks into the platform queue right after a track switch ' +
+      "(resilience against this tab dying before they'd otherwise play — see enqueueUpcoming)",
+    async () => {
+      const enqueueUpcoming = vi.fn().mockResolvedValue(undefined)
+      const adapter = createFakeAdapter({ enqueueUpcoming })
+      const fake = createFakeConnection()
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      const queue = [
+        makeQueueItem('a', { track: makeTrack({ platformIds: { spotify: 'spotify:track:a' } }) }),
+        makeQueueItem('b', { track: makeTrack({ platformIds: { spotify: 'spotify:track:b' } }) }),
+        makeQueueItem('c', { track: makeTrack({ platformIds: { spotify: 'spotify:track:c' } }) }),
+      ]
+      await act(async () => {
+        fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: makeState({ currentIndex: 0, isPlaying: true, queue }) })
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      expect(enqueueUpcoming).toHaveBeenCalledWith(['spotify:track:b', 'spotify:track:c'])
+    },
+  )
+
+  it('does not call enqueueUpcoming for an adapter that does not implement it (Apple has no equivalent native queue)', async () => {
+    const adapter = createFakeAdapter({ platform: 'apple', enqueueUpcoming: undefined })
+    const fake = createFakeConnection()
+    vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+    renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+    const queue = [
+      makeQueueItem('a', { track: makeTrack({ platformIds: { apple: 'apple:track:a' } }) }),
+      makeQueueItem('b', { track: makeTrack({ platformIds: { apple: 'apple:track:b' } }) }),
+    ]
+    await act(async () => {
+      fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: makeState({ currentIndex: 0, isPlaying: true, queue }) })
+      await vi.advanceTimersByTimeAsync(0)
+    })
+
+    // The track switch itself still needs to succeed — enqueueUpcoming being
+    // undefined just means mirroring is skipped, not a crash for everything else.
+    expect(adapter.play).toHaveBeenCalledWith('apple:track:a', expect.any(Number))
+  })
 })

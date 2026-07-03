@@ -12,6 +12,7 @@ vi.mock('../spotify/player', async () => {
     seek: vi.fn(),
     searchTracks: vi.fn(),
     searchByIsrc: vi.fn(),
+    addToQueue: vi.fn(),
   }
 })
 
@@ -175,5 +176,32 @@ describe('createSpotifyAdapter search', () => {
     expect(results).toEqual([
       { title: 'Song', artist: 'A, B', durationMs: 180_000, isrc: 'US1234567890', platformId: 'spotify:track:abc', artworkUrl: 'small.jpg' },
     ])
+  })
+})
+
+describe('createSpotifyAdapter enqueueUpcoming', () => {
+  afterEach(() => vi.clearAllMocks())
+
+  it('pushes each track to the native queue in order (sequential, not concurrent — Spotify appends in call order)', async () => {
+    const calls: string[] = []
+    vi.mocked(spotifyPlayer.addToQueue).mockImplementation(async (_token, _deviceId, uri) => {
+      calls.push(uri)
+    })
+
+    const adapter = createSpotifyAdapter(makeDeps())
+    await adapter.enqueueUpcoming?.(['spotify:track:1', 'spotify:track:2', 'spotify:track:3'])
+
+    expect(calls).toEqual(['spotify:track:1', 'spotify:track:2', 'spotify:track:3'])
+  })
+
+  it('keeps going after one track fails — best-effort, not all-or-nothing', async () => {
+    vi.mocked(spotifyPlayer.addToQueue)
+      .mockRejectedValueOnce(new Error('simulated failure'))
+      .mockResolvedValueOnce(undefined)
+
+    const adapter = createSpotifyAdapter(makeDeps())
+    await expect(adapter.enqueueUpcoming?.(['spotify:track:1', 'spotify:track:2'])).resolves.toBeUndefined()
+
+    expect(spotifyPlayer.addToQueue).toHaveBeenCalledTimes(2)
   })
 })

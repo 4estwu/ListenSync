@@ -20,6 +20,11 @@ const CORRECTION_COOLDOWN_MS = 3000
 const TRACK_END_EPSILON_MS = 800
 const INITIAL_LATENCY_ESTIMATE_MS = 250 // seed guess before any real measurement exists
 const LATENCY_EMA_WEIGHT = 0.3 // how much each new measurement moves the rolling estimate
+// Cap on how many upcoming tracks get mirrored into the platform's own
+// native queue per track switch (see mirrorUpcomingQueue) — each one is a
+// separate API call, and the goal is resilience against this tab dying, not
+// exhaustively replicating a long queue.
+const MAX_QUEUE_MIRROR = 10
 
 interface UseRoomSyncArgs {
   roomId: string
@@ -56,7 +61,6 @@ function nextPollDelay(state: RoomState): number {
 
 export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSync {
   const [clientId, setClientId] = useState<string | null>(null)
-  const [isHost, setIsHost] = useState(false)
   const [roomState, setRoomState] = useState<RoomState | null>(null)
   const [deviceError, setDeviceError] = useState<string | null>(null)
 
@@ -85,6 +89,12 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
   // instead of actually closing the gap.
   const latencyEstimateMsRef = useRef(INITIAL_LATENCY_ESTIMATE_MS)
 
+  // Derived (not a one-time flag from the initial "hello") so that server-side
+  // reporter failover — the relay promoting a different client after the
+  // previous reporter disconnects — takes effect here automatically the next
+  // time roomState arrives with a new hostId, with no dedicated event type
+  // needed.
+  const isHost = roomState !== null && clientId !== null && roomState.hostId === clientId
   useEffect(() => {
     isHostRef.current = isHost
   }, [isHost])
@@ -96,6 +106,29 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
   useEffect(() => {
     adapter.onDiagnostic?.((message) => onLog(message))
   }, [adapter, onLog])
+
+  // Best-effort, fire-and-forget: pushes the next few queued tracks into this
+  // platform's own native queue (currently Spotify only — see
+  // enqueueUpcoming's doc comment) right after switching to a new current
+  // track, so playback that's already underway can keep advancing on its own
+  // even if this tab gets backgrounded/killed before the rest would
+  // otherwise play. Never throws — a resolution or API failure here shouldn't
+  // affect the actual sync correction it's piggybacking on.
+  const mirrorUpcomingQueue = useCallback(
+    async (state: RoomState) => {
+      if (!adapter.enqueueUpcoming) return
+      const upcoming = state.queue.slice(state.currentIndex + 1, state.currentIndex + 1 + MAX_QUEUE_MIRROR)
+      if (upcoming.length === 0) return
+      const uris: string[] = []
+      for (const item of upcoming) {
+        const uri = await resolveTrackUri(adapter, item.track, resolvedUriCacheRef.current).catch(() => null)
+        if (uri) uris.push(uri)
+      }
+      if (uris.length === 0) return
+      await adapter.enqueueUpcoming(uris).catch((err: Error) => onLog(`Sync: queue mirror failed — ${err.message}`))
+    },
+    [adapter, onLog],
+  )
 
   /**
    * Polls this client's own playback once and reconciles it toward `state`.
@@ -180,6 +213,7 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
                 `Sync: switched to "${current!.track.title}" (was playing ${playback.platformId ?? 'nothing'}, ` +
                   `latency est. ${Math.round(latencyEstimateMsRef.current)}ms)`,
               )
+              void mirrorUpcomingQueue(state)
             } else if (needsPlayPauseFix) {
               if (state.isPlaying) await adapter.play(undefined, predictedPositionMs)
               else await adapter.pause()
@@ -214,7 +248,7 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
 
       return { playback, expectedUri }
     },
-    [adapter, onLog],
+    [adapter, onLog, mirrorUpcomingQueue],
   )
 
   // Referenced (not called directly) from the WS message handler below, so
@@ -234,7 +268,6 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
     conn.onMessage((event: RelayEvent) => {
       if (event.type === 'hello') {
         setClientId(event.clientId)
-        setIsHost(event.isHost)
         setRoomState(event.state)
         roomStateRef.current = event.state
         void reconcileRef.current(event.state, { skipCooldown: true })

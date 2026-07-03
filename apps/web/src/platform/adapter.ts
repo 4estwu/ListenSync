@@ -39,6 +39,16 @@ export interface PlaybackAdapter {
   resolveByIsrc(isrc: string): Promise<string | null>
   /** Optional: platform-specific diagnostic events (local SDK errors, buffering stalls) surfaced for logging. */
   onDiagnostic?(cb: (message: string) => void): void
+  /**
+   * Optional: mirrors upcoming tracks into this platform's own native queue,
+   * so playback started here can keep advancing through them even if this
+   * tab stops running (backgrounded/killed) before they'd otherwise play.
+   * Only Spotify Connect has a server-side queue we can push into this way —
+   * Apple's MusicKit JS plays directly within this tab's own JS/audio
+   * context, so there's no separate session to keep going without it; that
+   * limitation isn't something a web app can work around.
+   */
+  enqueueUpcoming?(platformIds: string[]): Promise<void>
 }
 
 interface SpotifyAdapterDeps {
@@ -157,6 +167,18 @@ export function createSpotifyAdapter({ getAccessToken, getDeviceId }: SpotifyAda
 
     onDiagnostic(cb) {
       subscribeToPlaybackDiagnostics(cb)
+    },
+
+    async enqueueUpcoming(platformIds) {
+      const token = await getAccessToken()
+      const deviceId = getDeviceId()
+      // Sequential, not Promise.all — Spotify's queue endpoint appends in
+      // call order, and concurrent requests would race for that order.
+      // Best-effort: one track failing (e.g. a transient error) shouldn't
+      // abort the rest.
+      for (const platformId of platformIds) {
+        await withRateLimit(() => spotifyPlayer.addToQueue(token, deviceId, platformId)).catch(() => undefined)
+      }
     },
   }
 }

@@ -16,11 +16,38 @@ import RoomChooser from './RoomChooser'
 import RoomView from './RoomView'
 import './App.css'
 
+// Resuming exactly where you left off — same platform, same room — on a
+// fresh app open (not just a same-tab reload) is the point of these: a phone
+// browser tab getting killed in the background and reopened later should
+// feel like unlocking a native app, not starting over from the platform
+// picker every time.
+const LAST_PLATFORM_KEY = 'listensync_last_platform'
+const LAST_ROOM_KEY = 'listensync_last_room'
+
+function isPlatform(value: string | null): value is Platform {
+  return value === 'spotify' || value === 'apple'
+}
+
 function App() {
-  const [platform, setPlatform] = useState<Platform | null>(null)
+  const [platform, setPlatformState] = useState<Platform | null>(() => {
+    const stored = localStorage.getItem(LAST_PLATFORM_KEY)
+    return isPlatform(stored) ? stored : null
+  })
+  const setPlatform = useCallback((next: Platform) => {
+    localStorage.setItem(LAST_PLATFORM_KEY, next)
+    setPlatformState(next)
+  }, [])
   const [roomId, setRoomId] = useState<string | null>(null)
   const [joinCode, setJoinCode] = useState('')
   const [pendingRoomFromUrl] = useState(() => new URLSearchParams(window.location.search).get('room'))
+  // Fallback rejoin target when there's no share-link room in the URL — the
+  // room this same browser last had open.
+  const [pendingRoomFromStorage] = useState(() => (pendingRoomFromUrl ? null : localStorage.getItem(LAST_ROOM_KEY)))
+  const rejoinTarget = pendingRoomFromUrl ?? pendingRoomFromStorage
+
+  useEffect(() => {
+    if (roomId) localStorage.setItem(LAST_ROOM_KEY, roomId)
+  }, [roomId])
 
   // --- Spotify ---
   const [spotifyToken, setSpotifyToken] = useState<SpotifyToken | null>(null)
@@ -151,6 +178,20 @@ function App() {
 
   const appleAdapter = useMemo(() => (musicKitInstance ? createAppleAdapter(musicKitInstance) : null), [musicKitInstance])
 
+  // MusicKit JS persists its own music-user-token across page loads (its own
+  // localStorage, not something this app manages) — so reopening the app
+  // with platform already set to 'apple' can skip straight past the login
+  // screen if that token's still valid, instead of requiring authorize()
+  // (a user-facing sign-in prompt) again every time.
+  useEffect(() => {
+    if (platform !== 'apple' || musicKitInstance) return
+    getMusicKit()
+      .then((music) => {
+        if (music.isAuthorized) setMusicKitInstance(music)
+      })
+      .catch((err: Error) => setAppleAuthError(err.message))
+  }, [platform, musicKitInstance])
+
   const handleAppleLogin = async () => {
     setAppleAuthorizing(true)
     setAppleAuthError(null)
@@ -167,10 +208,10 @@ function App() {
   // --- Room join (either platform) ---
   // For Spotify, wait until a device is picked too — otherwise playback has nothing to control.
   useEffect(() => {
-    if (roomId || !pendingRoomFromUrl) return
-    if (platform === 'spotify' && spotifyToken && deviceId) setRoomId(pendingRoomFromUrl)
-    if (platform === 'apple' && musicKitInstance) setRoomId(pendingRoomFromUrl)
-  }, [platform, spotifyToken, deviceId, musicKitInstance, roomId, pendingRoomFromUrl])
+    if (roomId || !rejoinTarget) return
+    if (platform === 'spotify' && spotifyToken && deviceId) setRoomId(rejoinTarget)
+    if (platform === 'apple' && musicKitInstance) setRoomId(rejoinTarget)
+  }, [platform, spotifyToken, deviceId, musicKitInstance, roomId, rejoinTarget])
 
   const inviteHeading = pendingRoomFromUrl ? "You've been invited to a listening room" : 'Synced listening'
 

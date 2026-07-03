@@ -18,10 +18,18 @@ import {
 config({ path: path.resolve(process.cwd(), "../../.env") });
 
 const PORT = Number(process.env.PORT ?? 8787);
+// How long an emptied room's state survives with zero connected clients
+// before being garbage-collected. Previously this was instant (deleted the
+// moment the last socket closed), which meant a phone locking, backgrounding
+// Safari, or even a brief network blip — not just deliberately leaving —
+// permanently destroyed the room's queue; reconnecting to the same room id
+// silently created a fresh empty one instead of resuming it.
+const ROOM_GRACE_PERIOD_MS = 10 * 60 * 1000;
 
 interface Room {
   state: ReturnType<typeof createInitialRoomState>;
   clients: Map<WebSocket, string>; // socket -> clientId
+  emptyTimeout: ReturnType<typeof setTimeout> | null;
 }
 
 const rooms = new Map<string, Room>();
@@ -76,19 +84,23 @@ wss.on("connection", (socket, request) => {
 
   let room = rooms.get(roomId);
   if (!room) {
-    room = { state: createInitialRoomState(roomId), clients: new Map() };
+    room = { state: createInitialRoomState(roomId), clients: new Map(), emptyTimeout: null };
     rooms.set(roomId, room);
+  } else if (room.emptyTimeout) {
+    // Someone reconnected before the grace period elapsed — the room's state
+    // (queue, current track, etc.) is exactly as they left it.
+    clearTimeout(room.emptyTimeout);
+    room.emptyTimeout = null;
   }
 
   const clientId = randomUUID();
-  // First connection to a room is the designated position-reporter (see
-  // "playback:report" below) — this is an internal bookkeeping role only,
-  // NOT playback control authority. Every connected client can
-  // play/pause/skip/queue; only one client's periodic position reports get
-  // trusted as the drift-correction anchor, to avoid two clients' polling
-  // loops fighting over the anchor.
-  // TODO: reporter failover — if this client disconnects, position reports
-  // stop until a new room is made; promote another connected client instead.
+  // First connection to a room (or the first to reconnect after the previous
+  // reporter left — see the close handler's failover below) is the
+  // designated position-reporter (see "playback:report" below) — this is an
+  // internal bookkeeping role only, NOT playback control authority. Every
+  // connected client can play/pause/skip/queue; only one client's periodic
+  // position reports get trusted as the drift-correction anchor, to avoid
+  // two clients' polling loops fighting over the anchor.
   if (!room.state.hostId) room.state.hostId = clientId;
   room.clients.set(socket, clientId);
 
@@ -143,7 +155,21 @@ wss.on("connection", (socket, request) => {
 
   socket.on("close", () => {
     room!.clients.delete(socket);
-    if (room!.clients.size === 0) rooms.delete(roomId);
+
+    // Reporter failover: promote a remaining client immediately so position
+    // reporting/auto-advance doesn't silently stop for whoever's left.
+    // useRoomSync derives its local isHost from roomState.hostId rather than
+    // a one-time flag, so broadcasting this is enough for the promoted
+    // client to pick up the role with no dedicated event type needed.
+    if (room!.state.hostId === clientId) {
+      const [nextReporterId] = room!.clients.values();
+      room!.state.hostId = nextReporterId ?? "";
+      if (room!.clients.size > 0) broadcastSync(room!);
+    }
+
+    if (room!.clients.size === 0) {
+      room!.emptyTimeout = setTimeout(() => rooms.delete(roomId), ROOM_GRACE_PERIOD_MS);
+    }
   });
 });
 
