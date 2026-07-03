@@ -635,4 +635,69 @@ describe('useRoomSync', () => {
       expect(gotoCalls.length).toBe(2)
     },
   )
+
+  it('sends playback:pause (not another playback:goto) when the track that just ended was the last one in the queue', async () => {
+    const adapter = createFakeAdapter({
+      getState: vi
+        .fn()
+        .mockResolvedValue(makePlaybackState({ isPlaying: true, positionMs: 199_500, durationMs: 200_000, platformId: 'spotify:track:abc' })),
+    })
+    const fake = createFakeConnection()
+    vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+    renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+    // Single-item queue — the track that's ending is the only (and thus
+    // last) one, so there's no nextIndex to advance to.
+    await act(async () => {
+      fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: nearEndState({ queue: [makeQueueItem('a')] }) })
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000) // first tick is always at SLOW_POLL_MS from mount
+    })
+
+    // Not asserting the exact positionMs sent with the pause — reconcile()'s
+    // own drift correction (see the earlier oscillation fix) can legitimately
+    // adjust it before the reporter block runs; goto-vs-pause is the point
+    // of this test, not exact position tracking.
+    const sentTypes = (fake.conn.send as Mock).mock.calls.map((c) => (c[0] as RelayEvent).type)
+    expect(sentTypes).toContain('playback:pause')
+    expect(sentTypes).not.toContain('playback:goto')
+  })
+
+  it('sends playback:pause when the *last* track of a multi-item queue ends, not just a single-item queue', async () => {
+    const adapter = createFakeAdapter({
+      getState: vi
+        .fn()
+        .mockResolvedValue(makePlaybackState({ isPlaying: true, positionMs: 199_500, durationMs: 200_000, platformId: 'spotify:track:b' })),
+    })
+    const fake = createFakeConnection()
+    vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+    renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+    await act(async () => {
+      fake.emit({
+        type: 'hello',
+        clientId: 'me',
+        isHost: true,
+        state: nearEndState({
+          currentIndex: 1, // "b" — the second and last item
+          queue: [
+            makeQueueItem('a', { track: makeTrack({ platformIds: { spotify: 'spotify:track:a' } }) }),
+            makeQueueItem('b', { track: makeTrack({ platformIds: { spotify: 'spotify:track:b' } }) }),
+          ],
+        }),
+      })
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000)
+    })
+
+    const sentTypes = (fake.conn.send as Mock).mock.calls.map((c) => (c[0] as RelayEvent).type)
+    expect(sentTypes).toContain('playback:pause')
+    expect(sentTypes).not.toContain('playback:goto')
+  })
 })
