@@ -35,3 +35,9 @@ export async function authorizeAppleMusic(): Promise<string> {
   const music = await getMusicKit()
   return music.authorize()
 }
+
+/** Clears MusicKit JS's own persisted music-user-token, so the next visit needs a fresh authorize(). */
+export async function signOutAppleMusic(): Promise<void> {
+  const music = await getMusicKit()
+  await music.unauthorize()
+}

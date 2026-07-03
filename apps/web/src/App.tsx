@@ -5,12 +5,13 @@ import {
   ensureFreshToken,
   getStoredToken,
   handleRedirectCallback,
+  logout as logoutSpotify,
   redirectToAuthorize,
   type SpotifyToken,
 } from './spotify/auth'
 import { getDevices, type SpotifyDevice } from './spotify/player'
 import { connectWebPlaybackDevice } from './spotify/webPlayback'
-import { authorizeAppleMusic, getMusicKit } from './apple/musicKit'
+import { authorizeAppleMusic, getMusicKit, signOutAppleMusic } from './apple/musicKit'
 import { createAppleAdapter, createSpotifyAdapter } from './platform/adapter'
 import RoomChooser from './RoomChooser'
 import RoomView from './RoomView'
@@ -39,10 +40,15 @@ function App() {
   }, [])
   const [roomId, setRoomId] = useState<string | null>(null)
   const [joinCode, setJoinCode] = useState('')
-  const [pendingRoomFromUrl] = useState(() => new URLSearchParams(window.location.search).get('room'))
+  const [pendingRoomFromUrl, setPendingRoomFromUrl] = useState(() => new URLSearchParams(window.location.search).get('room'))
   // Fallback rejoin target when there's no share-link room in the URL — the
-  // room this same browser last had open.
-  const [pendingRoomFromStorage] = useState(() => (pendingRoomFromUrl ? null : localStorage.getItem(LAST_ROOM_KEY)))
+  // room this same browser last had open. Both of these are proper state
+  // (not just lazy-initialized once) so leaving a room can actually clear
+  // them — otherwise the "Room join" effect below would just silently
+  // rejoin the same room right back the moment the user logs in again.
+  const [pendingRoomFromStorage, setPendingRoomFromStorage] = useState(() =>
+    pendingRoomFromUrl ? null : localStorage.getItem(LAST_ROOM_KEY),
+  )
   const rejoinTarget = pendingRoomFromUrl ?? pendingRoomFromStorage
 
   useEffect(() => {
@@ -245,6 +251,43 @@ function App() {
     if (platform === 'apple' && musicKitInstance) setRoomId(rejoinTarget)
   }, [platform, spotifyToken, deviceId, musicKitInstance, roomId, rejoinTarget])
 
+  // Stays logged in / on the same platform, just leaves the current room and
+  // clears every place a "come back to this room" target could be
+  // reconstructed from, so the "Room join" effect above doesn't just silently
+  // rejoin it the moment this client reconnects — and the address bar itself,
+  // since a share-link URL's ?room= would otherwise keep pointing at it too.
+  const handleLeaveRoom = useCallback(() => {
+    setRoomId(null)
+    localStorage.removeItem(LAST_ROOM_KEY)
+    setPendingRoomFromStorage(null)
+    setPendingRoomFromUrl(null)
+    if (window.location.search) window.history.replaceState({}, '', window.location.pathname)
+  }, [])
+
+  // Full reset: signs out of whichever platform was active and returns to
+  // the very first platform-choice screen. This is the only way out of a
+  // platform that auto-restored from a previous visit (see LAST_PLATFORM_KEY
+  // above) if that's not the one you meant to use this time.
+  const handleSwitchPlatform = useCallback(() => {
+    if (platform === 'spotify') logoutSpotify()
+    if (platform === 'apple') void signOutAppleMusic().catch(() => undefined)
+    localStorage.removeItem(LAST_PLATFORM_KEY)
+    localStorage.removeItem(LAST_ROOM_KEY)
+    setPendingRoomFromStorage(null)
+    setPendingRoomFromUrl(null)
+    if (window.location.search) window.history.replaceState({}, '', window.location.pathname)
+    setRoomId(null)
+    setPlatformState(null)
+    setSpotifyToken(null)
+    setSpotifyAuthError(null)
+    setMusicKitInstance(null)
+    setAppleAuthError(null)
+    setDevices([])
+    setDeviceId('')
+    setWebPlaybackDeviceId(null)
+    userPickedDeviceRef.current = false
+  }, [platform])
+
   const inviteHeading = pendingRoomFromUrl ? "You've been invited to a listening room" : 'Synced listening'
 
   if (!platform) {
@@ -272,6 +315,9 @@ function App() {
           {spotifyAuthError && <p style={{ color: 'tomato' }}>{spotifyAuthError}</p>}
           <button type="button" className="primary" onClick={() => void redirectToAuthorize(pendingRoomFromUrl ?? undefined)}>
             {pendingRoomFromUrl ? 'Log in with Spotify to join' : 'Log in with Spotify'}
+          </button>
+          <button type="button" onClick={handleSwitchPlatform} style={{ opacity: 0.6 }}>
+            Use Apple Music instead
           </button>
         </section>
       )
@@ -323,11 +369,14 @@ function App() {
             </p>
           )}
           <RoomChooser setRoomId={setRoomId} joinCode={joinCode} setJoinCode={setJoinCode} disabled={!deviceId} />
+          <button type="button" onClick={handleSwitchPlatform} style={{ opacity: 0.6 }}>
+            Sign out / switch platform
+          </button>
         </section>
       )
     }
 
-    return <RoomView roomId={roomId} adapter={spotifyAdapter} />
+    return <RoomView roomId={roomId} adapter={spotifyAdapter} onLeaveRoom={handleLeaveRoom} onSwitchPlatform={handleSwitchPlatform} />
   }
 
   // platform === 'apple'
@@ -339,6 +388,9 @@ function App() {
         <button type="button" className="primary" onClick={() => void handleAppleLogin()} disabled={appleAuthorizing}>
           {appleAuthorizing ? 'Opening Apple Music sign-in…' : 'Log in with Apple Music'}
         </button>
+        <button type="button" onClick={handleSwitchPlatform} style={{ opacity: 0.6 }}>
+          Use Spotify instead
+        </button>
       </section>
     )
   }
@@ -348,11 +400,14 @@ function App() {
       <section id="center">
         <h1>Synced listening</h1>
         <RoomChooser setRoomId={setRoomId} joinCode={joinCode} setJoinCode={setJoinCode} />
+        <button type="button" onClick={handleSwitchPlatform} style={{ opacity: 0.6 }}>
+          Sign out / switch platform
+        </button>
       </section>
     )
   }
 
-  return <RoomView roomId={roomId} adapter={appleAdapter!} />
+  return <RoomView roomId={roomId} adapter={appleAdapter!} onLeaveRoom={handleLeaveRoom} onSwitchPlatform={handleSwitchPlatform} />
 }
 
 export default App

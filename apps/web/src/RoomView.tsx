@@ -25,9 +25,13 @@ function formatTime(ms: number): string {
 interface RoomViewProps {
   roomId: string
   adapter: PlaybackAdapter
+  /** Leaves this room but stays logged in on the same platform/account — returns to the room chooser. */
+  onLeaveRoom?: () => void
+  /** Signs out entirely and returns to the very first platform-choice screen. */
+  onSwitchPlatform?: () => void
 }
 
-function RoomView({ roomId, adapter }: RoomViewProps) {
+function RoomView({ roomId, adapter, onLeaveRoom, onSwitchPlatform }: RoomViewProps) {
   const [log, setLog] = useState<string[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<AdapterTrackResult[]>([])
@@ -122,9 +126,21 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
             {clientId && <code className="client-badge">{clientId.slice(0, 8)}</code>}
           </p>
         </div>
-        <button type="button" className="primary" onClick={copyShareLink}>
-          {linkCopied ? 'Copied!' : 'Copy share link'}
-        </button>
+        <div className="controls-row">
+          <button type="button" className="primary" onClick={copyShareLink}>
+            {linkCopied ? 'Copied!' : 'Copy share link'}
+          </button>
+          {onLeaveRoom && (
+            <button type="button" onClick={onLeaveRoom}>
+              Leave room
+            </button>
+          )}
+          {onSwitchPlatform && (
+            <button type="button" className="icon-button" onClick={onSwitchPlatform}>
+              Sign out
+            </button>
+          )}
+        </div>
       </header>
 
       {deviceError && (

@@ -39,6 +39,7 @@ declare global {
         music<T = unknown>(path: string, params?: Record<string, unknown>): Promise<{ data: T }>
       }
       authorize(): Promise<string>
+      unauthorize(): Promise<void>
       setQueue(options: { song: string; startPlaying?: boolean }): Promise<unknown>
     }
 
