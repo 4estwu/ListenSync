@@ -46,6 +46,11 @@ function App() {
     webPlaybackDeviceIdRef.current = webPlaybackDeviceId
   }, [webPlaybackDeviceId])
 
+  // Set only by the device <select>'s onChange (an explicit user action) —
+  // once true, auto-selection logic below backs off entirely rather than
+  // overriding a choice the user actually made.
+  const userPickedDeviceRef = useRef(false)
+
   const getSpotifyAccessToken = useCallback(async () => {
     if (!spotifyTokenRef.current) throw new Error('Not logged in to Spotify')
     const fresh = await ensureFreshToken(spotifyTokenRef.current)
@@ -68,13 +73,19 @@ function App() {
       const list = await getDevices(accessToken)
       setSpotifyAuthError(null)
       setDevices(list)
-      // Prefer an external device over the Web Playback SDK one (it'll show
-      // up in this same list once connected) — see the note by
-      // connectWebPlaybackDevice below on why it shouldn't win by default.
-      const externalDevices = list.filter((d) => d.id !== webPlaybackDeviceIdRef.current)
-      const active = externalDevices.find((d) => d.is_active) ?? list.find((d) => d.is_active)
+      if (userPickedDeviceRef.current) return
+      // Prefer this tab's own Web Playback SDK device over any external one:
+      // it needs no pre-existing Spotify session anywhere else, which is the
+      // whole point — someone should be able to open this page, log in, and
+      // just start playing, the same as Apple Music already does in-tab.
+      // Falls back to an external device only when the SDK device isn't
+      // known yet (still loading, or unavailable — see the effect below).
+      if (webPlaybackDeviceIdRef.current) {
+        setDeviceId(webPlaybackDeviceIdRef.current)
+        return
+      }
+      const active = list.find((d) => d.is_active)
       if (active) setDeviceId(active.id)
-      else if (externalDevices[0]) setDeviceId(externalDevices[0].id)
       else if (list[0]) setDeviceId(list[0].id)
     } catch (err) {
       setSpotifyAuthError((err as Error).message)
@@ -102,25 +113,36 @@ function App() {
   }, [platform, spotifyToken, refreshDevices])
 
   // Registers this tab itself as a playable device, matching Apple Music's
-  // in-browser playback — stays available in the picker below, but does NOT
-  // override an external device as the default. It used to always win the
-  // race and become the default device; confirmed in testing that the Web
-  // Playback SDK can be genuinely unreliable in a given browser environment
-  // (DRM/codec issues outside this app's control — an external device with
-  // the exact same reconciliation logic played back perfectly), so silently
-  // defaulting to it regressed a working setup into a broken one. Only
-  // becomes the default if no external device is found at all. Soft-fails
-  // otherwise: if it doesn't work (e.g. non-Premium account), external-device
-  // selection still works exactly as before.
+  // in-browser playback — this is what lets someone join with nothing but a
+  // browser tab, no separate Spotify app/session required. Claims the
+  // default outright once ready (upgrading over whatever refreshDevices
+  // auto-selected first, since SDK script loading is slower than the
+  // devices API call), unless the user already explicitly picked something
+  // via the dropdown. (Earlier this deliberately deferred to any external
+  // device instead, based on a since-corrected diagnosis that blamed the SDK
+  // itself for what was actually a missing OAuth scope — the SDK is reliable
+  // now that that's fixed.) Soft-fails otherwise: if it doesn't work (e.g.
+  // non-Premium account, or any mobile browser — Spotify restricts the SDK
+  // to desktop), external-device selection still works exactly as before.
   useEffect(() => {
     if (platform !== 'spotify' || !spotifyToken) return
     connectWebPlaybackDevice(getSpotifyAccessToken)
       .then((id) => {
         setWebPlaybackDeviceId(id)
-        setDeviceId((prev) => prev || id)
+        if (!userPickedDeviceRef.current) setDeviceId(id)
       })
       .catch((err: Error) => setWebPlaybackError(err.message))
   }, [platform, spotifyToken, getSpotifyAccessToken])
+
+  // Auto-refresh the device list while on the picker screen so a device that
+  // becomes active (e.g. this tab's own SDK device finishing setup, or the
+  // user opening Spotify on their phone per the prompt below) shows up
+  // without a manual click.
+  useEffect(() => {
+    if (platform !== 'spotify' || !spotifyToken || roomId) return
+    const handle = setInterval(() => void refreshDevices(), 4000)
+    return () => clearInterval(handle)
+  }, [platform, spotifyToken, roomId, refreshDevices])
 
   // --- Apple Music ---
   const [musicKitInstance, setMusicKitInstance] = useState<MusicKit.MusicKitInstance | null>(null)
@@ -187,9 +209,9 @@ function App() {
         <section id="center">
           <h1>Pick a playback device</h1>
           <p style={{ opacity: 0.75, maxWidth: 420, textAlign: 'center' }}>
-            Spotify needs an active session on the device you want to control. If you don't see it below
-            (or playback later stops responding), open Spotify and start playing anything — even paused —
-            then refresh.
+            This browser tab will be used automatically once it's ready — no separate Spotify session needed.
+            On mobile, Spotify doesn't allow that, so pick a device below instead: open Spotify there and
+            start playing anything (even paused) so it shows up here.
           </p>
           <a className="button-link" href="spotify:" target="_blank" rel="noreferrer">
             Open Spotify app
@@ -198,7 +220,13 @@ function App() {
           <button type="button" onClick={() => void refreshDevices()}>
             Refresh devices
           </button>
-          <select value={deviceId} onChange={(e) => setDeviceId(e.target.value)}>
+          <select
+            value={deviceId}
+            onChange={(e) => {
+              userPickedDeviceRef.current = true
+              setDeviceId(e.target.value)
+            }}
+          >
             <option value="">— select device —</option>
             {webPlaybackDeviceId && !devices.some((d) => d.id === webPlaybackDeviceId) && (
               <option value={webPlaybackDeviceId}>This browser tab</option>
@@ -212,7 +240,8 @@ function App() {
           </select>
           {devices.length === 0 && !webPlaybackDeviceId && !spotifyAuthError && (
             <p style={{ opacity: 0.7 }}>
-              No devices found — open Spotify on a phone/desktop app first, then click "Refresh devices".
+              Setting up this tab as a device… if that fails (e.g. no Premium), open Spotify elsewhere — it'll
+              show up here automatically.
             </p>
           )}
           {webPlaybackError && (
