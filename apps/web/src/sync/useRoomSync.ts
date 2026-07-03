@@ -7,7 +7,15 @@ import { resolveTrackUri } from './resolveTrack'
 const SLOW_POLL_MS = 3000 // steady-state mid-track — drift accumulates slowly, no need to check often
 const FAST_POLL_MS = 500 // near a track boundary — auto-advance timing and start-up need more precision
 const BOUNDARY_WINDOW_MS = 5000 // within this many ms of a track's start or end counts as "near a boundary"
-const DRIFT_THRESHOLD_MS = 1500
+// Was 1500 — a real, consistent ~1350ms lag on a joining client sat just
+// under that threshold and was permanently judged "close enough," never
+// getting corrected. A joining client's *first* play() always transfers
+// (deviceConfirmedActive starts false), and that extra network round trip
+// before the device even starts is a real, mostly-unavoidable source of a
+// few hundred ms to ~1s of initial lag — tightening this so the drift
+// correction actually closes that gap afterward, instead of quietly
+// tolerating it forever.
+const DRIFT_THRESHOLD_MS = 400
 const CORRECTION_COOLDOWN_MS = 3000
 const TRACK_END_EPSILON_MS = 800
 
