@@ -120,8 +120,13 @@ function App() {
       // earlier automatic attempt (on page load, no gesture available on a
       // silent auto-rejoin) failed. connectWebPlaybackDevice() no-ops if
       // already connected, and no longer caches a failure forever, so this
-      // is a cheap, safe call to make on every refresh.
-      if (!webPlaybackDeviceIdRef.current) {
+      // is a cheap, safe call to make on every refresh. Skipped entirely on
+      // mobile — Spotify documents the Web Playback SDK as desktop-only, but
+      // in practice it doesn't always fail cleanly there: it can still
+      // register a device_id that then errors when actually used, rather
+      // than rejecting up front the way non-Premium accounts do. Not worth
+      // the risk of offering a device that looks selectable but isn't.
+      if (!webPlaybackDeviceIdRef.current && !isLikelyMobile()) {
         connectWebPlaybackDevice(getSpotifyAccessToken)
           .then((id) => {
             setWebPlaybackDeviceId(id)
@@ -188,10 +193,12 @@ function App() {
   // device instead, based on a since-corrected diagnosis that blamed the SDK
   // itself for what was actually a missing OAuth scope — the SDK is reliable
   // now that that's fixed.) Soft-fails otherwise: if it doesn't work (e.g.
-  // non-Premium account, or any mobile browser — Spotify restricts the SDK
-  // to desktop), external-device selection still works exactly as before.
+  // non-Premium account), external-device selection still works exactly as
+  // before. Skipped outright on mobile — see the matching guard in
+  // refreshDevices for why: it doesn't reliably fail there, it can register
+  // a device that then errors when actually used.
   useEffect(() => {
-    if (platform !== 'spotify' || !spotifyToken) return
+    if (platform !== 'spotify' || !spotifyToken || isLikelyMobile()) return
     connectWebPlaybackDevice(getSpotifyAccessToken)
       .then((id) => {
         setWebPlaybackDeviceId(id)
@@ -368,7 +375,14 @@ function App() {
           >
             <option value="">— select device —</option>
             {webPlaybackDeviceId && !devices.some((d) => d.id === webPlaybackDeviceId) && (
-              <option value={webPlaybackDeviceId}>This browser tab</option>
+              // Belt-and-suspenders: the effects above no longer even attempt
+              // this on mobile, so webPlaybackDeviceId shouldn't get set
+              // there at all — disabling it here too in case it somehow does
+              // (e.g. state left over from switching platforms) rather than
+              // trusting that alone, since selecting it on mobile errors.
+              <option value={webPlaybackDeviceId} disabled={isLikelyMobile()}>
+                This browser tab{isLikelyMobile() ? ' (unavailable on mobile)' : ''}
+              </option>
             )}
             {devices.map((d) => (
               <option key={d.id} value={d.id}>
