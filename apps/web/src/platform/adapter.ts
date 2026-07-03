@@ -48,6 +48,15 @@ export function createSpotifyAdapter({ getAccessToken, getDeviceId }: SpotifyAda
   // seeing a coherent state.
   let cachedState: AdapterPlaybackState = { isPlaying: false, positionMs: 0, durationMs: null, platformId: null }
   let blockedUntil = 0
+  // Updated from the most recent getState() poll's device.is_active. Used to
+  // decide whether play()/seek() actually need to re-transfer the device —
+  // doing it unconditionally "to be safe" turned out to be its own bug: it
+  // can interrupt the Web Playback SDK's in-flight buffering/loading,
+  // producing a buffering-start/end/playback_error loop every time a
+  // correction fired against a device that was already fine. Starts false so
+  // the very first play() (a device that's never been used this session)
+  // still transfers.
+  let deviceConfirmedActive = false
 
   // All Spotify calls go through here so a 429 anywhere (not just getState)
   // sets the shared backoff, and every call checks it first — attempting a
@@ -72,6 +81,7 @@ export function createSpotifyAdapter({ getAccessToken, getDeviceId }: SpotifyAda
       if (Date.now() < blockedUntil) return cachedState
       try {
         const state = await withRateLimit(async () => spotifyPlayer.getPlaybackState(await getAccessToken()))
+        deviceConfirmedActive = state !== null && state.device.id === getDeviceId() && state.device.is_active
         cachedState = state
           ? {
               isPlaying: state.is_playing,
@@ -95,7 +105,7 @@ export function createSpotifyAdapter({ getAccessToken, getDeviceId }: SpotifyAda
     async play(platformId, positionMs) {
       await withRateLimit(async () => {
         const token = await getAccessToken()
-        await spotifyPlayer.play(token, getDeviceId(), platformId, positionMs)
+        await spotifyPlayer.play(token, getDeviceId(), platformId, positionMs, !deviceConfirmedActive)
       })
     },
 
@@ -109,7 +119,7 @@ export function createSpotifyAdapter({ getAccessToken, getDeviceId }: SpotifyAda
     async seek(positionMs) {
       await withRateLimit(async () => {
         const token = await getAccessToken()
-        await spotifyPlayer.seek(token, getDeviceId(), positionMs)
+        await spotifyPlayer.seek(token, getDeviceId(), positionMs, !deviceConfirmedActive)
       })
     },
 

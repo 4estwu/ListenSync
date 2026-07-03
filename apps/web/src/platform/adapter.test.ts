@@ -91,6 +91,69 @@ describe('createSpotifyAdapter rate-limit backoff', () => {
   })
 })
 
+describe('createSpotifyAdapter device-active tracking', () => {
+  afterEach(() => vi.clearAllMocks())
+
+  it(
+    'play() forces a transfer when the device has never been confirmed active (fresh session)',
+    async () => {
+      vi.mocked(spotifyPlayer.play).mockResolvedValue(undefined)
+
+      const adapter = createSpotifyAdapter(makeDeps())
+      await adapter.play('spotify:track:abc', 0)
+
+      expect(spotifyPlayer.play).toHaveBeenCalledWith('token123', 'device1', 'spotify:track:abc', 0, true)
+    },
+  )
+
+  it(
+    "play()/seek() skip forcing a transfer once getState() has confirmed this device is already active — " +
+      're-transferring an already-active device can interrupt the Web Playback SDK mid-buffer',
+    async () => {
+      vi.mocked(spotifyPlayer.getPlaybackState).mockResolvedValue({
+        is_playing: true,
+        progress_ms: 1000,
+        device: { id: 'device1', name: 'Test', type: 'Computer', is_active: true },
+        item: { uri: 'spotify:track:abc', name: 'Song', artists: [], album: { name: '', images: [] }, duration_ms: 200_000 },
+      })
+      vi.mocked(spotifyPlayer.play).mockResolvedValue(undefined)
+      vi.mocked(spotifyPlayer.seek).mockResolvedValue(undefined)
+
+      const adapter = createSpotifyAdapter(makeDeps())
+      await adapter.getState()
+      await adapter.play(undefined, 5000)
+      await adapter.seek(6000)
+
+      expect(spotifyPlayer.play).toHaveBeenCalledWith('token123', 'device1', undefined, 5000, false)
+      expect(spotifyPlayer.seek).toHaveBeenCalledWith('token123', 'device1', 6000, false)
+    },
+  )
+
+  it("forces a transfer again if getState() reveals this device is no longer the active one", async () => {
+    vi.mocked(spotifyPlayer.getPlaybackState)
+      .mockResolvedValueOnce({
+        is_playing: true,
+        progress_ms: 1000,
+        device: { id: 'device1', name: 'Test', type: 'Computer', is_active: true },
+        item: { uri: 'spotify:track:abc', name: 'Song', artists: [], album: { name: '', images: [] }, duration_ms: 200_000 },
+      })
+      .mockResolvedValueOnce({
+        is_playing: false,
+        progress_ms: 1000,
+        device: { id: 'device1', name: 'Test', type: 'Computer', is_active: false },
+        item: { uri: 'spotify:track:abc', name: 'Song', artists: [], album: { name: '', images: [] }, duration_ms: 200_000 },
+      })
+    vi.mocked(spotifyPlayer.play).mockResolvedValue(undefined)
+
+    const adapter = createSpotifyAdapter(makeDeps())
+    await adapter.getState() // confirms active
+    await adapter.getState() // reveals no longer active
+    await adapter.play(undefined, 5000)
+
+    expect(spotifyPlayer.play).toHaveBeenCalledWith('token123', 'device1', undefined, 5000, true)
+  })
+})
+
 describe('createSpotifyAdapter search', () => {
   afterEach(() => vi.clearAllMocks())
 

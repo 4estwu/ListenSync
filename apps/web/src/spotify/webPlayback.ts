@@ -58,6 +58,7 @@ function loadSdkScript(): Promise<void> {
 
 let connectPromise: Promise<string> | null = null
 let cachedPlayer: Spotify.Player | null = null
+let diagnosticsSubscribed = false
 
 /**
  * Registers an in-browser Spotify Connect device (this tab) and resolves with
@@ -101,11 +102,15 @@ export function connectWebPlaybackDevice(getAccessToken: () => Promise<string>):
  * `player_state_changed` (a genuine buffering stall, vs. is_playing simply
  * lagging reality). Only meaningful when this client is actually using the
  * in-tab Web Playback SDK device rather than an external one; a no-op if the
- * SDK was never connected.
+ * SDK was never connected. Idempotent — attaching listeners a second time
+ * would fire every event twice (this is exactly what happened when the
+ * calling effect had no cleanup and ran twice under React StrictMode's
+ * dev-mode double-invoke).
  */
 export function subscribeToPlaybackDiagnostics(onEvent: (message: string) => void): void {
   const player = cachedPlayer
-  if (!player) return
+  if (!player || diagnosticsSubscribed) return
+  diagnosticsSubscribed = true
 
   player.addListener('not_ready', ({ device_id }) => {
     onEvent(`Spotify SDK: this device went not-ready (${device_id.slice(0, 8)}…) — the tab's local player reports itself unavailable`)

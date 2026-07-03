@@ -93,13 +93,25 @@ export async function transferPlayback(accessToken: string, deviceId: string): P
   })
 }
 
-export async function play(accessToken: string, deviceId: string, trackUri?: string, positionMs?: number): Promise<void> {
-  // Always transfer, not just when starting a specific new track. A device
-  // can lose its "active" status for reasons outside our control (idling,
-  // another app taking over, a stretch of failed calls during a rate limit)
-  // — resuming without re-transferring can return 200/204 while producing no
-  // audio at all, which is silent and easy to mistake for "it worked."
-  await transferPlayback(accessToken, deviceId)
+/**
+ * `forceTransfer` defaults to true (safe default: activate the device before
+ * touching it) but should be passed `false` by callers who already know —
+ * from a recent getState()'s device.is_active — that the target device is
+ * already the active one. Re-transferring an already-active device isn't a
+ * pure no-op: it can interrupt the Web Playback SDK's in-flight
+ * buffering/loading, which showed up as a rapid buffering-start/buffering-
+ * end/playback_error loop every time a correction fired — i.e. our own
+ * "always transfer to be safe" fix was itself causing instability once the
+ * device WAS already active and just needed a plain resume/seek.
+ */
+export async function play(
+  accessToken: string,
+  deviceId: string,
+  trackUri?: string,
+  positionMs?: number,
+  forceTransfer = true,
+): Promise<void> {
+  if (forceTransfer) await transferPlayback(accessToken, deviceId)
 
   const body: { uris?: string[]; position_ms?: number } = {}
   if (trackUri) body.uris = [trackUri]
@@ -123,16 +135,13 @@ export async function skipNext(accessToken: string, deviceId: string): Promise<v
 
 /**
  * Seeks within the currently playing track — cheaper than reissuing play()
- * when only position has drifted. Also transfers first: the assumption that
- * "we only reach seek() once play/pause already agree, so the device must
- * already be active" turned out to be false in practice — a device can drop
- * active status sometime *after* a successful resume (a rate-limited stretch
- * right before repeated large, barely-shrinking drift corrections is what
- * surfaced this), and seeking a no-longer-active device is exactly as silent
- * a no-op as playing one was.
+ * when only position has drifted. `forceTransfer` follows the same reasoning
+ * as play() above: only re-transfer when there's actual evidence (a recent
+ * device.is_active reading) that the device isn't already active — otherwise
+ * this can interrupt an already-fine, already-playing device.
  */
-export async function seek(accessToken: string, deviceId: string, positionMs: number): Promise<void> {
-  await transferPlayback(accessToken, deviceId)
+export async function seek(accessToken: string, deviceId: string, positionMs: number, forceTransfer = true): Promise<void> {
+  if (forceTransfer) await transferPlayback(accessToken, deviceId)
   const params = new URLSearchParams({ position_ms: String(Math.round(positionMs)), device_id: deviceId })
   await spotifyFetch(accessToken, `/me/player/seek?${params.toString()}`, { method: 'PUT' })
 }

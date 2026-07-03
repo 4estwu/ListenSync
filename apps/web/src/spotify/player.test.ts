@@ -49,6 +49,17 @@ describe('play', () => {
       expect(body).toEqual({ device_ids: ['device1'], play: true })
     },
   )
+
+  it(
+    'skips the transfer entirely when forceTransfer=false — re-transferring an already-active ' +
+      'device can interrupt the Web Playback SDK mid-buffer, not just a harmless extra call',
+    async () => {
+      await play('token', 'device1', undefined, 5000, false)
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(fetchMock.mock.calls[0][0]).toBe(PLAY_URL)
+    },
+  )
 })
 
 describe('pause', () => {
@@ -83,7 +94,7 @@ describe('seek', () => {
   })
 
   it(
-    'transfers playback first — a device can drop active status sometime after a ' +
+    'transfers playback first by default — a device can drop active status sometime after a ' +
       'successful resume, and seeking a no-longer-active device is as silent a no-op as playing one',
     async () => {
       await seek('token', 'device1', 1000)
@@ -93,4 +104,11 @@ describe('seek', () => {
       expect(urls[1]).toContain('/me/player/seek')
     },
   )
+
+  it('skips the transfer when forceTransfer=false (the device was just confirmed active)', async () => {
+    await seek('token', 'device1', 1000, false)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toContain('/me/player/seek')
+  })
 })
