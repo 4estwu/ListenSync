@@ -18,6 +18,8 @@ const BOUNDARY_WINDOW_MS = 5000 // within this many ms of a track's start or end
 const DRIFT_THRESHOLD_MS = 400
 const CORRECTION_COOLDOWN_MS = 3000
 const TRACK_END_EPSILON_MS = 800
+const INITIAL_LATENCY_ESTIMATE_MS = 250 // seed guess before any real measurement exists
+const LATENCY_EMA_WEIGHT = 0.3 // how much each new measurement moves the rolling estimate
 
 interface UseRoomSyncArgs {
   roomId: string
@@ -61,6 +63,14 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
   const lastCorrectionAtRef = useRef(0)
   const resolvedUriCacheRef = useRef(new Map<string, string | null>())
   const lastUnresolvedItemIdRef = useRef<string | null>(null)
+  // Rolling estimate of how long a play()/seek() call takes from decision to
+  // Spotify accepting it — real time keeps moving during that round trip, so
+  // a correction that targets "where playback should be right now" is
+  // already stale by the time it takes effect. Without compensating for
+  // this, every correction undercorrects by roughly its own latency,
+  // converging to a steady-state lag approximately equal to that latency
+  // instead of actually closing the gap.
+  const latencyEstimateMsRef = useRef(INITIAL_LATENCY_ESTIMATE_MS)
 
   useEffect(() => {
     isHostRef.current = isHost
@@ -133,23 +143,49 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
           // extends the rate limit and produces a correction storm based on
           // increasingly stale data (this is what actually happened above).
           lastCorrectionAtRef.current = Date.now()
+
+          // Predictive compensation: expectedPositionMs is "where playback
+          // should be right now," but real time keeps moving during the
+          // round trip to Spotify, so by the time this call actually takes
+          // effect that target is already stale by roughly the call's own
+          // latency. Without this, every correction undercorrects by about
+          // its own latency and converges to a steady-state lag instead of
+          // actually closing the gap. Only meaningful when the target is
+          // actively playing — a pause has nothing to compensate for.
+          const predictedPositionMs = state.isPlaying ? expectedPositionMs + latencyEstimateMsRef.current : expectedPositionMs
+          const callStartedAt = Date.now()
+
           try {
             if (needsTrackSwitch) {
-              await adapter.play(expectedUri, expectedPositionMs)
-              onLog(`Sync: switched to "${current!.track.title}" (was playing ${playback.platformId ?? 'nothing'})`)
+              await adapter.play(expectedUri, predictedPositionMs)
+              onLog(
+                `Sync: switched to "${current!.track.title}" (was playing ${playback.platformId ?? 'nothing'}, ` +
+                  `latency est. ${Math.round(latencyEstimateMsRef.current)}ms)`,
+              )
             } else if (needsPlayPauseFix) {
-              if (state.isPlaying) await adapter.play(undefined, expectedPositionMs)
+              if (state.isPlaying) await adapter.play(undefined, predictedPositionMs)
               else await adapter.pause()
               onLog(
                 `Sync: corrected ${state.isPlaying ? 'resume' : 'pause'} ` +
                   `(device reported isPlaying=${playback.isPlaying} at ${Math.round(playback.positionMs)}ms)`,
               )
             } else {
-              await adapter.seek(expectedPositionMs)
+              await adapter.seek(predictedPositionMs)
               onLog(
                 `Sync: corrected drift of ${Math.round(drift)}ms ` +
-                  `(device at ${Math.round(playback.positionMs)}ms, expected ${Math.round(expectedPositionMs)}ms)`,
+                  `(device at ${Math.round(playback.positionMs)}ms, targeting ${Math.round(predictedPositionMs)}ms, ` +
+                  `latency est. ${Math.round(latencyEstimateMsRef.current)}ms)`,
               )
+            }
+
+            // Refine the estimate from this call's actual round trip — only
+            // when we applied compensation (a pause() call's timing isn't a
+            // play/seek round trip and isn't representative). Clamped so a
+            // single outlier (e.g. a slow retry) can't swing it wildly.
+            if (state.isPlaying) {
+              const elapsed = Date.now() - callStartedAt
+              const blended = latencyEstimateMsRef.current * (1 - LATENCY_EMA_WEIGHT) + elapsed * LATENCY_EMA_WEIGHT
+              latencyEstimateMsRef.current = Math.min(2000, Math.max(50, blended))
             }
           } catch (err) {
             onLog(`Sync: correction failed — ${(err as Error).message}`)
