@@ -42,7 +42,20 @@ function RoomView({ roomId, adapter, onLeaveRoom, onSwitchPlatform }: RoomViewPr
     setLog((prev) => [`${new Date().toLocaleTimeString()}  ${line}`, ...prev].slice(0, 30))
   }, [])
 
-  const { clientId, roomState, deviceError, addToQueue, removeFromQueue, gotoIndex, skipNext, pause, resume, seekTo } = useRoomSync({
+  const {
+    clientId,
+    roomState,
+    deviceError,
+    needsGesture,
+    addToQueue,
+    removeFromQueue,
+    gotoIndex,
+    skipNext,
+    pause,
+    resume,
+    seekTo,
+    retryPlayback,
+  } = useRoomSync({
     roomId,
     adapter,
     onLog: say,
@@ -148,6 +161,17 @@ function RoomView({ roomId, adapter, onLeaveRoom, onSwitchPlatform }: RoomViewPr
           Lost connection to your playback device — its session ended, so it won't respond until you reopen
           the app on that device and start playing something to reactivate it. This will recover
           automatically once it does.
+        </div>
+      )}
+
+      {needsGesture && (
+        <div className="banner">
+          <button type="button" className="primary" onClick={retryPlayback}>
+            Tap to resume playback
+          </button>
+          <p className="muted" style={{ marginTop: 8 }}>
+            Your browser blocks audio from starting automatically — this only happens once per visit.
+          </p>
         </div>
       )}
 

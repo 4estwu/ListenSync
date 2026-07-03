@@ -5,9 +5,18 @@ import type { QueueItem, RelayEvent, RoomState, Track } from '@spotifyapple/shar
 import { connectRoom, type RelayConnection } from '../relay/client'
 import { AdapterDeviceError, type AdapterPlaybackState, type PlaybackAdapter } from '../platform/adapter'
 import { useRoomSync } from './useRoomSync'
+import { hasUserGesture } from './userGesture'
 
 vi.mock('../relay/client', () => ({
   connectRoom: vi.fn(),
+}))
+
+// Defaults to "already interacted" so the existing tests below — none of
+// which are testing the gesture gate itself — don't all have to separately
+// simulate a click just to let a track-switch/resume correction go through.
+// The dedicated gesture-gate tests override this per-test.
+vi.mock('./userGesture', () => ({
+  hasUserGesture: vi.fn(() => true),
 }))
 
 function makeTrack(overrides: Partial<Track> = {}): Track {
@@ -450,4 +459,77 @@ describe('useRoomSync', () => {
       expect((reportCalls[reportCalls.length - 1] as { positionMs: number }).positionMs).toBe(correctedTarget)
     },
   )
+
+  it(
+    'does not start playback without a user gesture (browser autoplay policy) — regression: an ' +
+      'auto-restored login + auto-rejoined room (see App.tsx session persistence) meant this could be ' +
+      'the first thing that happens on a fresh page load, with no click yet to unlock audio, surfacing ' +
+      'as Chrome\'s "play() failed because the user didn\'t interact with the document first"',
+    async () => {
+      vi.mocked(hasUserGesture).mockReturnValue(false)
+
+      const adapter = createFakeAdapter()
+      const fake = createFakeConnection()
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      const { result } = renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      await act(async () => {
+        fake.emit({
+          type: 'hello',
+          clientId: 'me',
+          isHost: true,
+          state: makeState({ currentIndex: 0, isPlaying: true, queue: [makeQueueItem('a')] }),
+        })
+      })
+
+      expect(adapter.play).not.toHaveBeenCalled()
+      expect(result.current.needsGesture).toBe(true)
+
+      // Simulates the user tapping the "Tap to resume playback" prompt.
+      vi.mocked(hasUserGesture).mockReturnValue(true)
+      await act(async () => {
+        result.current.retryPlayback()
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      expect(adapter.play).toHaveBeenCalledWith('spotify:track:abc', expect.any(Number))
+      expect(result.current.needsGesture).toBe(false)
+    },
+  )
+
+  it('does not gate a drift-fix seek or a pause behind a user gesture — only starting new audio needs one', async () => {
+    vi.mocked(hasUserGesture).mockReturnValue(false)
+
+    const adapter = createFakeAdapter({
+      getState: vi.fn().mockResolvedValue(
+        makePlaybackState({ isPlaying: true, positionMs: 10_000, durationMs: 200_000, platformId: 'spotify:track:abc' }),
+      ),
+    })
+    const fake = createFakeConnection()
+    vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+    renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+    await act(async () => {
+      fake.emit({
+        type: 'hello',
+        clientId: 'me',
+        isHost: true,
+        state: makeState({
+          currentIndex: 0,
+          isPlaying: true,
+          positionMs: 5000,
+          updatedAt: Date.now() - 20_000, // canonical says this should be well past 10_000 by now
+          queue: [makeQueueItem('a')],
+        }),
+      })
+    })
+
+    // Same track, already playing — a pure drift-fix seek, not a play() call — should proceed even with no gesture.
+    expect(adapter.seek).toHaveBeenCalled()
+    expect(adapter.play).not.toHaveBeenCalled()
+
+    vi.mocked(hasUserGesture).mockReturnValue(true)
+  })
 })

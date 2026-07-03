@@ -3,6 +3,7 @@ import type { QueueItem, RelayEvent, RoomState, Track } from '@spotifyapple/shar
 import { connectRoom, type RelayConnection } from '../relay/client'
 import { AdapterDeviceError, type AdapterPlaybackState, type PlaybackAdapter } from '../platform/adapter'
 import { resolveTrackUri } from './resolveTrack'
+import { hasUserGesture } from './userGesture'
 
 const SLOW_POLL_MS = 3000 // steady-state mid-track — drift accumulates slowly, no need to check often
 const FAST_POLL_MS = 500 // near a track boundary — auto-advance timing and start-up need more precision
@@ -16,6 +17,20 @@ const BOUNDARY_WINDOW_MS = 5000 // within this many ms of a track's start or end
 // correction actually closes that gap afterward, instead of quietly
 // tolerating it forever.
 const DRIFT_THRESHOLD_MS = 400
+// Apple's MusicKit JS only updates currentPlaybackTime roughly once per
+// second (a documented characteristic of the SDK, not something this app
+// controls) — apple/player.ts's getPlaybackState() multiplies that by 1000,
+// so every reading lands on an exact multiple of 1000ms. Comparing that
+// against a continuously-elapsing expected position means up to ~1000ms of
+// apparent "drift" shows up organically within any given second, even with
+// zero real drift. Spotify's progress_ms doesn't have this quantization, so
+// only Apple needs the wider tolerance — using the tight threshold for both
+// meant Apple corrected almost every poll, chasing measurement noise rather
+// than real drift.
+const DRIFT_THRESHOLD_MS_BY_PLATFORM: Record<PlaybackAdapter['platform'], number> = {
+  spotify: DRIFT_THRESHOLD_MS,
+  apple: 1300,
+}
 const CORRECTION_COOLDOWN_MS = 3000
 const TRACK_END_EPSILON_MS = 800
 const INITIAL_LATENCY_ESTIMATE_MS = 250 // seed guess before any real measurement exists
@@ -39,6 +54,8 @@ export interface RoomSync {
   roomState: RoomState | null
   /** Set when this client's own device rejected a call as gone (see AdapterDeviceError); cleared automatically once a poll succeeds again. */
   deviceError: string | null
+  /** Set when a correction needs to start audio but no user gesture has happened yet this page load (browser autoplay policy) — clears itself once one does. */
+  needsGesture: boolean
   addToQueue: (track: Track, addedBy: string) => void
   removeFromQueue: (itemId: string) => void
   gotoIndex: (index: number) => void
@@ -46,6 +63,7 @@ export interface RoomSync {
   pause: () => void
   resume: () => void
   seekTo: (positionMs: number) => void
+  retryPlayback: () => void
 }
 
 /** Distance in ms to the current track's start or end, using only local canonical state — no API call needed to decide how urgently to poll. */
@@ -64,6 +82,7 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
   const [clientId, setClientId] = useState<string | null>(null)
   const [roomState, setRoomState] = useState<RoomState | null>(null)
   const [deviceError, setDeviceError] = useState<string | null>(null)
+  const [needsGesture, setNeedsGesture] = useState(false)
 
   const connRef = useRef<RelayConnection | null>(null)
   const roomStateRef = useRef<RoomState | null>(null)
@@ -197,9 +216,26 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
         const needsTrackSwitch = playback.platformId !== expectedUri
         const needsPlayPauseFix = !needsTrackSwitch && playback.isPlaying !== state.isPlaying
         const drift = !needsTrackSwitch && !needsPlayPauseFix && state.isPlaying ? Math.abs(playback.positionMs - expectedPositionMs) : 0
-        const needsDriftFix = drift > DRIFT_THRESHOLD_MS
+        const needsDriftFix = drift > DRIFT_THRESHOLD_MS_BY_PLATFORM[adapter.platform]
 
+        // Starting audio (a track switch, or resuming from paused) needs a
+        // real user gesture somewhere in this page load — browsers block it
+        // otherwise (Chrome: "play() failed because the user didn't interact
+        // with the document first"). This bit us specifically because of the
+        // session-persistence work: an auto-restored login + auto-rejoined
+        // room means this can be the very first thing that happens on a
+        // fresh page load, with no click yet to have unlocked it. Seeking or
+        // pausing don't start anything new, so they're not gated — only
+        // skipped (not failed-and-logged) so this retries cleanly the moment
+        // a gesture happens, instead of spamming "correction failed" every
+        // poll in the meantime.
+        const startsAudio = needsTrackSwitch || (needsPlayPauseFix && state.isPlaying)
+        if (startsAudio && !hasUserGesture()) {
+          setNeedsGesture(true)
+          return { playback, expectedUri }
+        }
         if (needsTrackSwitch || needsPlayPauseFix || needsDriftFix) {
+          setNeedsGesture(false)
           // Engage the cooldown before attempting, not after succeeding — a
           // *failed* correction (e.g. a 429) still needs to back off, or it
           // just retries every tick into an already-rate-limited API, which
@@ -445,5 +481,29 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
     connRef.current?.send({ type: state.isPlaying ? 'playback:resume' : 'playback:pause', positionMs: clamped })
   }, [])
 
-  return { clientId, isHost, roomState, deviceError, addToQueue, removeFromQueue, gotoIndex, skipNext, pause, resume, seekTo }
+  // For the "tap to resume playback" prompt (see needsGesture): the click
+  // itself already satisfies hasUserGesture() by the time this runs (a
+  // document-level pointerdown listener fires before this button's own
+  // onClick does), so immediately retrying here — rather than waiting for
+  // the next scheduled poll, up to a few seconds away — is what makes
+  // tapping the prompt feel instant instead of laggy.
+  const retryPlayback = useCallback(() => {
+    if (roomStateRef.current) void reconcileRef.current(roomStateRef.current, { skipCooldown: true })
+  }, [])
+
+  return {
+    clientId,
+    isHost,
+    roomState,
+    deviceError,
+    needsGesture,
+    addToQueue,
+    removeFromQueue,
+    gotoIndex,
+    skipNext,
+    pause,
+    resume,
+    seekTo,
+    retryPlayback,
+  }
 }
