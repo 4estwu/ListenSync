@@ -38,6 +38,14 @@ function App() {
     deviceIdRef.current = deviceId
   }, [deviceId])
 
+  // Tracked via ref (not just state) so refreshDevices below can read the
+  // latest value without needing it in its own dependency array.
+  const [webPlaybackDeviceId, setWebPlaybackDeviceId] = useState<string | null>(null)
+  const webPlaybackDeviceIdRef = useRef(webPlaybackDeviceId)
+  useEffect(() => {
+    webPlaybackDeviceIdRef.current = webPlaybackDeviceId
+  }, [webPlaybackDeviceId])
+
   const getSpotifyAccessToken = useCallback(async () => {
     if (!spotifyTokenRef.current) throw new Error('Not logged in to Spotify')
     const fresh = await ensureFreshToken(spotifyTokenRef.current)
@@ -60,8 +68,13 @@ function App() {
       const list = await getDevices(accessToken)
       setSpotifyAuthError(null)
       setDevices(list)
-      const active = list.find((d) => d.is_active)
+      // Prefer an external device over the Web Playback SDK one (it'll show
+      // up in this same list once connected) — see the note by
+      // connectWebPlaybackDevice below on why it shouldn't win by default.
+      const externalDevices = list.filter((d) => d.id !== webPlaybackDeviceIdRef.current)
+      const active = externalDevices.find((d) => d.is_active) ?? list.find((d) => d.is_active)
       if (active) setDeviceId(active.id)
+      else if (externalDevices[0]) setDeviceId(externalDevices[0].id)
       else if (list[0]) setDeviceId(list[0].id)
     } catch (err) {
       setSpotifyAuthError((err as Error).message)
@@ -89,17 +102,22 @@ function App() {
   }, [platform, spotifyToken, refreshDevices])
 
   // Registers this tab itself as a playable device, matching Apple Music's
-  // in-browser playback — once connected it just becomes the default device
-  // (still overridable via the picker below). Soft-fails: if it doesn't work
-  // (e.g. non-Premium account), external-device selection still works exactly
-  // as before.
-  const [webPlaybackDeviceId, setWebPlaybackDeviceId] = useState<string | null>(null)
+  // in-browser playback — stays available in the picker below, but does NOT
+  // override an external device as the default. It used to always win the
+  // race and become the default device; confirmed in testing that the Web
+  // Playback SDK can be genuinely unreliable in a given browser environment
+  // (DRM/codec issues outside this app's control — an external device with
+  // the exact same reconciliation logic played back perfectly), so silently
+  // defaulting to it regressed a working setup into a broken one. Only
+  // becomes the default if no external device is found at all. Soft-fails
+  // otherwise: if it doesn't work (e.g. non-Premium account), external-device
+  // selection still works exactly as before.
   useEffect(() => {
     if (platform !== 'spotify' || !spotifyToken) return
     connectWebPlaybackDevice(getSpotifyAccessToken)
       .then((id) => {
         setWebPlaybackDeviceId(id)
-        setDeviceId(id)
+        setDeviceId((prev) => prev || id)
       })
       .catch((err: Error) => setWebPlaybackError(err.message))
   }, [platform, spotifyToken, getSpotifyAccessToken])
