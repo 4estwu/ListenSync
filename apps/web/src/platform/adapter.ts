@@ -1,6 +1,7 @@
 import type { Platform } from '@spotifyapple/shared'
 import * as spotifyPlayer from '../spotify/player'
 import * as applePlayer from '../apple/player'
+import { subscribeToPlaybackDiagnostics } from '../spotify/webPlayback'
 
 export interface AdapterTrackResult {
   title: string
@@ -28,6 +29,8 @@ export interface PlaybackAdapter {
   seek(positionMs: number): Promise<void>
   search(query: string): Promise<AdapterTrackResult[]>
   resolveByIsrc(isrc: string): Promise<string | null>
+  /** Optional: platform-specific diagnostic events (local SDK errors, buffering stalls) surfaced for logging. */
+  onDiagnostic?(cb: (message: string) => void): void
 }
 
 interface SpotifyAdapterDeps {
@@ -131,6 +134,10 @@ export function createSpotifyAdapter({ getAccessToken, getDeviceId }: SpotifyAda
         const result = await spotifyPlayer.searchByIsrc(token, isrc)
         return result?.uri ?? null
       })
+    },
+
+    onDiagnostic(cb) {
+      subscribeToPlaybackDiagnostics(cb)
     },
   }
 }

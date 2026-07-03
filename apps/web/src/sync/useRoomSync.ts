@@ -58,6 +58,14 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
     isHostRef.current = isHost
   }, [isHost])
 
+  // Platform-specific diagnostic events (local SDK errors, buffering stalls) —
+  // optional, only meaningful for adapters that implement it (currently just
+  // Spotify's in-tab Web Playback SDK device). Surfaces the SDK's own signals
+  // instead of only ever inferring what happened from REST polling.
+  useEffect(() => {
+    adapter.onDiagnostic?.((message) => onLog(message))
+  }, [adapter, onLog])
+
   /**
    * Polls this client's own playback once and reconciles it toward `state`.
    * Always polls (the caller may need the fresh reading regardless of whether
@@ -117,14 +125,20 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
           try {
             if (needsTrackSwitch) {
               await adapter.play(expectedUri, expectedPositionMs)
-              onLog(`Sync: switched to "${current!.track.title}"`)
+              onLog(`Sync: switched to "${current!.track.title}" (was playing ${playback.platformId ?? 'nothing'})`)
             } else if (needsPlayPauseFix) {
               if (state.isPlaying) await adapter.play(undefined, expectedPositionMs)
               else await adapter.pause()
-              onLog(`Sync: corrected ${state.isPlaying ? 'resume' : 'pause'}`)
+              onLog(
+                `Sync: corrected ${state.isPlaying ? 'resume' : 'pause'} ` +
+                  `(device reported isPlaying=${playback.isPlaying} at ${Math.round(playback.positionMs)}ms)`,
+              )
             } else {
               await adapter.seek(expectedPositionMs)
-              onLog(`Sync: corrected drift of ${Math.round(drift)}ms`)
+              onLog(
+                `Sync: corrected drift of ${Math.round(drift)}ms ` +
+                  `(device at ${Math.round(playback.positionMs)}ms, expected ${Math.round(expectedPositionMs)}ms)`,
+              )
             }
           } catch (err) {
             onLog(`Sync: correction failed — ${(err as Error).message}`)
