@@ -391,4 +391,63 @@ describe('useRoomSync', () => {
 
     expect(fake.conn.send).toHaveBeenCalledWith({ type: 'playback:pause', positionMs: 0 })
   })
+
+  it(
+    'reports the corrected position after a drift-fix seek, not the stale pre-correction reading — ' +
+      'regression: with a single client in the room, that client\'s own report is the sole source of ' +
+      'canonical state, so reporting the stale reading re-anchored state back to the position just ' +
+      'corrected away from, guaranteeing the next poll saw "drift" again and corrected the opposite way ' +
+      '— an oscillation (skip back, skip forward) repeating every poll, not two independent bugs',
+    async () => {
+      const getState = vi.fn()
+      const adapter = createFakeAdapter({ getState })
+      const fake = createFakeConnection()
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      const matchingPositionMs = 5000
+      getState.mockResolvedValue(
+        makePlaybackState({ isPlaying: true, positionMs: matchingPositionMs, durationMs: 200_000, platformId: 'spotify:track:abc' }),
+      )
+
+      renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      const helloState = makeState({
+        currentIndex: 0,
+        isPlaying: true,
+        positionMs: matchingPositionMs,
+        updatedAt: Date.now(),
+        queue: [makeQueueItem('a')],
+      })
+      await act(async () => {
+        fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: helloState })
+      })
+      expect(adapter.seek).not.toHaveBeenCalled() // sanity: nothing to correct yet
+
+      // By the next poll, the device reads well behind where canonical state
+      // says it should be — this stale reading is what getState() keeps
+      // returning even after the correction below is issued (a real device
+      // wouldn't actually seek instantaneously either).
+      const staleReadingMs = 10_000
+      getState.mockResolvedValue(
+        makePlaybackState({ isPlaying: true, positionMs: staleReadingMs, durationMs: 200_000, platformId: 'spotify:track:abc' }),
+      )
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000) // fires the first scheduled poll tick
+      })
+
+      expect(adapter.seek).toHaveBeenCalledTimes(1)
+      const correctedTarget = (adapter.seek as Mock).mock.calls[0][0] as number
+      expect(correctedTarget).not.toBe(staleReadingMs)
+
+      const reportCalls = (fake.conn.send as Mock).mock.calls
+        .map((call) => call[0] as RelayEvent)
+        .filter((event) => event.type === 'playback:report')
+      expect(reportCalls.length).toBeGreaterThan(0)
+      for (const report of reportCalls) {
+        expect((report as { positionMs: number }).positionMs).not.toBe(staleReadingMs)
+      }
+      expect((reportCalls[reportCalls.length - 1] as { positionMs: number }).positionMs).toBe(correctedTarget)
+    },
+  )
 })

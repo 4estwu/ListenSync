@@ -226,13 +226,21 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
                   `latency est. ${Math.round(latencyEstimateMsRef.current)}ms)`,
               )
               void mirrorUpcomingQueue(state)
+              playback.positionMs = predictedPositionMs
+              playback.isPlaying = state.isPlaying
+              playback.platformId = expectedUri
             } else if (needsPlayPauseFix) {
-              if (state.isPlaying) await adapter.play(undefined, predictedPositionMs)
-              else await adapter.pause()
+              if (state.isPlaying) {
+                await adapter.play(undefined, predictedPositionMs)
+                playback.positionMs = predictedPositionMs
+              } else {
+                await adapter.pause()
+              }
               onLog(
                 `Sync: corrected ${state.isPlaying ? 'resume' : 'pause'} ` +
                   `(device reported isPlaying=${playback.isPlaying} at ${Math.round(playback.positionMs)}ms)`,
               )
+              playback.isPlaying = state.isPlaying
             } else {
               await adapter.seek(predictedPositionMs)
               onLog(
@@ -240,7 +248,20 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
                   `(device at ${Math.round(playback.positionMs)}ms, targeting ${Math.round(predictedPositionMs)}ms, ` +
                   `latency est. ${Math.round(latencyEstimateMsRef.current)}ms)`,
               )
+              playback.positionMs = predictedPositionMs
             }
+            // The report sent right after this (see tick()'s reporter block)
+            // uses this same returned `playback` object as ground truth. With
+            // only one client, that report IS the sole source of canonical
+            // state — reporting the pre-correction reading we started this
+            // function with would immediately re-anchor canonical state back
+            // to the position we just corrected away from, guaranteeing the
+            // *next* poll sees "drift" again and corrects the opposite way.
+            // That's an oscillation, not two independent bugs: skip back
+            // (this correction), skip forward (undoing it via a stale
+            // report), repeating every poll. Updating playback here to what
+            // we just told the device to do closes that loop.
+            lastKnownPositionRef.current = playback.positionMs
 
             // Refine the estimate from this call's actual round trip — only
             // when we applied compensation (a pause() call's timing isn't a
