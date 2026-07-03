@@ -20,6 +20,14 @@ export interface AdapterPlaybackState {
   platformId: string | null
 }
 
+/**
+ * Platform-agnostic wrapper around a lost/expired playback device (see
+ * SpotifyDeviceError in spotify/player.ts — Apple's adapter never throws
+ * this today, but callers in useRoomSync shouldn't need to know which
+ * platform they're talking to).
+ */
+export class AdapterDeviceError extends Error {}
+
 export interface PlaybackAdapter {
   platform: Platform
   getState(): Promise<AdapterPlaybackState | null>
@@ -70,6 +78,7 @@ export function createSpotifyAdapter({ getAccessToken, getDeviceId }: SpotifyAda
       return await fn()
     } catch (err) {
       if (err instanceof spotifyPlayer.SpotifyRateLimitError) blockedUntil = Date.now() + err.retryAfterMs
+      if (err instanceof spotifyPlayer.SpotifyDeviceError) throw new AdapterDeviceError(err.message)
       throw err
     }
   }

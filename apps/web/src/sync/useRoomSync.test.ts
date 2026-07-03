@@ -3,7 +3,7 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { QueueItem, RelayEvent, RoomState, Track } from '@spotifyapple/shared'
 import { connectRoom, type RelayConnection } from '../relay/client'
-import type { AdapterPlaybackState, PlaybackAdapter } from '../platform/adapter'
+import { AdapterDeviceError, type AdapterPlaybackState, type PlaybackAdapter } from '../platform/adapter'
 import { useRoomSync } from './useRoomSync'
 
 vi.mock('../relay/client', () => ({
@@ -244,6 +244,35 @@ describe('useRoomSync', () => {
       const sentTypes = (fake.conn.send as Mock).mock.calls.map((call) => (call[0] as RelayEvent).type)
       expect(sentTypes).not.toContain('playback:pause')
       expect(sentTypes).not.toContain('playback:goto')
+    },
+  )
+
+  it(
+    'surfaces deviceError when the adapter reports a lost device, and clears it once a poll succeeds again ' +
+      "(regression: this failure used to be buried in the scrolling log with no visible recoverable state)",
+    async () => {
+      const getState = vi.fn().mockRejectedValueOnce(new AdapterDeviceError('Spotify lost this device'))
+      getState.mockResolvedValue(makePlaybackState())
+      const adapter = createFakeAdapter({ getState })
+      const fake = createFakeConnection()
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      const { result } = renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      await act(async () => {
+        fake.emit({
+          type: 'hello',
+          clientId: 'me',
+          isHost: true,
+          state: makeState({ currentIndex: 0, isPlaying: true, queue: [makeQueueItem('a')] }),
+        })
+      })
+      expect(result.current.deviceError).toBe('Spotify lost this device')
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000)
+      })
+      expect(result.current.deviceError).toBeNull()
     },
   )
 })

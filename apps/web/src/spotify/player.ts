@@ -37,6 +37,17 @@ export class SpotifyRateLimitError extends Error {
   }
 }
 
+/**
+ * Every call in this file that targets a specific device (transfer, play,
+ * pause, seek, queue) 404s with this shape when Spotify no longer recognizes
+ * that device_id — this means the device's Connect session actually ended
+ * (not just "currently paused"), most often because the physical
+ * app/device went properly offline. The cached deviceId won't start working
+ * again on its own; distinguishing this from a generic error lets the UI
+ * explain what's actually wrong instead of a silent "nothing happens."
+ */
+export class SpotifyDeviceError extends Error {}
+
 async function spotifyFetch(accessToken: string, path: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -48,6 +59,9 @@ async function spotifyFetch(accessToken: string, path: string, init?: RequestIni
   if (res.status === 429) {
     const retryAfterSeconds = Number(res.headers.get('Retry-After') ?? '1')
     throw new SpotifyRateLimitError(retryAfterSeconds * 1000)
+  }
+  if (res.status === 404) {
+    throw new SpotifyDeviceError(`Spotify lost this device (${path}) — its Connect session ended`)
   }
   if (!res.ok && res.status !== 204) {
     throw new Error(`Spotify API ${res.status} ${path}: ${await res.text()}`)

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { pause, play, seek } from './player'
+import { pause, play, seek, SpotifyDeviceError } from './player'
 
 const TRANSFER_URL = 'https://api.spotify.com/v1/me/player'
 const PLAY_URL = 'https://api.spotify.com/v1/me/player/play?device_id=device1'
@@ -111,4 +111,13 @@ describe('seek', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(fetchMock.mock.calls[0][0]).toContain('/me/player/seek')
   })
+
+  it(
+    'throws SpotifyDeviceError (not a generic Error) on a 404 — this is Spotify\'s shape for ' +
+      "a device whose Connect session has actually ended, distinct from other failures so the UI can explain it",
+    async () => {
+      fetchMock.mockResolvedValue(new Response('{"error":{"status":404,"message":"Device not found"}}', { status: 404 }))
+      await expect(seek('token', 'device1', 1000, false)).rejects.toBeInstanceOf(SpotifyDeviceError)
+    },
+  )
 })

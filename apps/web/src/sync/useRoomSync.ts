@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { QueueItem, RelayEvent, RoomState, Track } from '@spotifyapple/shared'
 import { connectRoom, type RelayConnection } from '../relay/client'
-import type { AdapterPlaybackState, PlaybackAdapter } from '../platform/adapter'
+import { AdapterDeviceError, type AdapterPlaybackState, type PlaybackAdapter } from '../platform/adapter'
 import { resolveTrackUri } from './resolveTrack'
 
 const SLOW_POLL_MS = 3000 // steady-state mid-track — drift accumulates slowly, no need to check often
@@ -32,6 +32,8 @@ export interface RoomSync {
   /** Whether this client is the internal position-reporter — informational only, doesn't gate controls. */
   isHost: boolean
   roomState: RoomState | null
+  /** Set when this client's own device rejected a call as gone (see AdapterDeviceError); cleared automatically once a poll succeeds again. */
+  deviceError: string | null
   addToQueue: (track: Track, addedBy: string) => void
   gotoIndex: (index: number) => void
   skipNext: () => void
@@ -55,6 +57,7 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
   const [clientId, setClientId] = useState<string | null>(null)
   const [isHost, setIsHost] = useState(false)
   const [roomState, setRoomState] = useState<RoomState | null>(null)
+  const [deviceError, setDeviceError] = useState<string | null>(null)
 
   const connRef = useRef<RelayConnection | null>(null)
   const roomStateRef = useRef<RoomState | null>(null)
@@ -101,9 +104,14 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
     ): Promise<{ playback: AdapterPlaybackState | null; expectedUri: string | null }> => {
       const playback = await adapter.getState().catch((err: Error) => {
         onLog(`Sync: playback poll error — ${err.message}`)
+        if (err instanceof AdapterDeviceError) setDeviceError(err.message)
         return null
       })
       if (!playback) return { playback: null, expectedUri: null }
+      // A successful poll means this client's device is responding again —
+      // clear any earlier device-lost banner rather than leaving it stuck
+      // showing after the underlying problem has already resolved itself.
+      setDeviceError(null)
       lastKnownPositionRef.current = playback.positionMs
 
       const current = state.currentIndex >= 0 ? state.queue[state.currentIndex] : null
@@ -189,6 +197,7 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
             }
           } catch (err) {
             onLog(`Sync: correction failed — ${(err as Error).message}`)
+            if (err instanceof AdapterDeviceError) setDeviceError((err as Error).message)
           }
         }
       }
@@ -337,5 +346,5 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
     connRef.current?.send({ type: 'playback:resume', positionMs: lastKnownPositionRef.current })
   }, [])
 
-  return { clientId, isHost, roomState, addToQueue, gotoIndex, skipNext, pause, resume }
+  return { clientId, isHost, roomState, deviceError, addToQueue, gotoIndex, skipNext, pause, resume }
 }

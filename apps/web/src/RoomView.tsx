@@ -29,7 +29,7 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
     setLog((prev) => [`${new Date().toLocaleTimeString()}  ${line}`, ...prev].slice(0, 30))
   }, [])
 
-  const { clientId, roomState, addToQueue, gotoIndex, skipNext, pause, resume } = useRoomSync({
+  const { clientId, roomState, deviceError, addToQueue, gotoIndex, skipNext, pause, resume } = useRoomSync({
     roomId,
     adapter,
     onLog: say,
@@ -81,6 +81,14 @@ function RoomView({ roomId, adapter }: RoomViewProps) {
           {linkCopied ? 'Copied!' : 'Copy share link'}
         </button>
       </div>
+
+      {deviceError && (
+        <p style={{ color: 'tomato', marginTop: 16 }}>
+          Lost connection to your playback device — its session ended, so it won't respond until you reopen
+          the app on that device and start playing something to reactivate it. This will recover
+          automatically once it does.
+        </p>
+      )}
 
       <div style={{ marginTop: 16 }}>
         <strong>Now playing:</strong>
