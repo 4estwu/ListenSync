@@ -6,7 +6,14 @@
     "baseUrl": ".",
     "paths": {
       "react": ["./node_modules/@types/react"]
-    }
+    },
+    // expo/tsconfig.base + moduleResolution "node10" ends up resolving
+    // "module" to "es6", which doesn't allow dynamic import() syntax —
+    // needed by relay/client.test.ts to re-import the module fresh after
+    // stubbing its env var per test. This only affects tsc's type-checking
+    // rules, not the actual Metro/Babel bundle (which ignores this field
+    // entirely), so it's safe to bump without touching runtime behavior.
+    "module": "esnext"
   },
   "include": ["src", "App.tsx"]
 }

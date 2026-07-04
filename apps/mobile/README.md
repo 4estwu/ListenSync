@@ -72,3 +72,23 @@ Spotify's App Remote SDK expects the real Spotify app to be installed, so
 physical device access, which wasn't available while this was drafted. The
 Apple Music WebView path has no such constraint in principle (it's just a
 web view), but is likewise unverified here.
+
+## Unit tests
+
+`npm test -w apps/mobile` (or `npm run test` from this directory) runs
+Vitest — 15 tests across `sync/resolveTrack.test.ts` (verbatim port of the
+web app's test — same logic), `relay/client.test.ts` (real reconnect/backoff
+behavior against a throwaway `ws` server, not mocks), and
+`sync/useRoomSync.test.ts` (a smaller subset of the web app's regression
+suite: event-driven reconciliation, correction cooldown, poll-loop
+resilience to adapter failures, device-error surfacing, seek/queue actions).
+Hook tests use `react-test-renderer`, not `@testing-library/react` +
+`react-dom` — mixing react-dom@19 (hoisted to the repo root from `apps/web`)
+with this workspace's pinned react@18.3.1 (react-native's peer requirement)
+crashes with a dual-React-instance error; `react-test-renderer` avoids
+react-dom entirely and is the standard way to test RN hooks. See
+`vitest.config.ts`'s comments for the same issue with a stray `ws@6` nested
+under this workspace by an Expo/RN transitive dependency.
+
+Nothing native (Spotify App Remote, the actual mobile UI) is covered —
+that still needs physical device testing, as noted above.
