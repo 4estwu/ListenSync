@@ -8,13 +8,14 @@ import { styles } from './styles'
 type Props = NativeStackScreenProps<RootStackParamList, 'Connect'>
 
 /**
- * Handles both platforms' auth — the actual SDK calls are UNVERIFIED (see
- * platform/spotifyAdapter.ts and platform/appleMusicAdapter.ts's doc
- * comments). This screen's job is just the flow shell: trigger auth, show a
- * loading/error state, and move on once the adapter reports success.
+ * Spotify-only now — Apple Music is handled by AppleMusicWebViewScreen
+ * instead, which never routes through here. The actual Spotify SDK call is
+ * UNVERIFIED (see platform/spotifyAdapter.ts's doc comments). This screen's
+ * job is just the flow shell: trigger auth, show a loading/error state, and
+ * move on once the adapter reports success.
  */
 export function ConnectScreen({ navigation }: Props) {
-  const { platform, setSpotifyAuthed, setAppleAuthed } = useSession()
+  const { setSpotifyAuthed } = useSession()
   const [connecting, setConnecting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -22,18 +23,11 @@ export function ConnectScreen({ navigation }: Props) {
     setConnecting(true)
     setError(null)
     try {
-      if (platform === 'spotify') {
-        // TODO(native): SpotifySdk.authenticate({ clientID, redirectURL, scopes }).
-        // Placeholder — this screen exists so the navigation flow and error
-        // handling shell are in place before that call is wired up.
-        throw new Error('Spotify auth not yet implemented — see ConnectScreen.tsx TODO(native)')
-      } else if (platform === 'apple') {
-        // TODO(native): AppleMusic.authorize() or equivalent.
-        throw new Error('Apple Music auth not yet implemented — see ConnectScreen.tsx TODO(native)')
-      }
-      if (platform === 'spotify') setSpotifyAuthed(true)
-      if (platform === 'apple') setAppleAuthed(true)
-      navigation.navigate('RoomChooser')
+      // TODO(native): SpotifySdk.authenticate({ clientID, redirectURL, scopes }),
+      // then setSpotifyAuthed(true) and navigation.navigate('RoomChooser').
+      // Placeholder — this screen exists so the navigation flow and error
+      // handling shell are in place before that call is wired up.
+      throw new Error('Spotify auth not yet implemented — see ConnectScreen.tsx TODO(native)')
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -41,7 +35,7 @@ export function ConnectScreen({ navigation }: Props) {
     }
   }
 
-  const label = platform === 'spotify' ? 'Log in with Spotify' : 'Log in with Apple Music'
+  const label = 'Log in with Spotify'
 
   return (
     <View style={styles.centerScreen}>

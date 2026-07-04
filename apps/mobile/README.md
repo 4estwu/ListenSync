@@ -13,14 +13,30 @@ the deployed web app or relay.
   same relay `apps/web` uses — no native module needed, React Native's
   built-in WebSocket is enough), `src/sync/useRoomSync.ts` and
   `src/sync/resolveTrack.ts` (ported from `apps/web`, same sync/drift-
-  correction logic), all the screens/navigation.
-- **Stubbed, needs native SDK wiring**: `src/platform/spotifyAdapter.ts` and
-  `src/platform/appleMusicAdapter.ts` — every method throws
-  "not yet implemented." Auth in `src/screens/ConnectScreen.tsx` is the same.
-  These need real calls into `@wwdrew/expo-spotify-sdk` and
-  `@lomray/react-native-apple-music` — written from those libraries'
-  documented APIs but not runtime-verified (no device/simulator available
-  while drafting this). Look for `TODO(native)` comments.
+  correction logic), all the screens/navigation, and
+  `src/screens/AppleMusicWebViewScreen.tsx` (embeds the deployed web app —
+  see "Apple Music: WebView, not native" below).
+- **Stubbed, needs native SDK wiring**: `src/platform/spotifyAdapter.ts` —
+  every method throws "not yet implemented." Auth in
+  `src/screens/ConnectScreen.tsx` is the same. This needs real calls into
+  `@wwdrew/expo-spotify-sdk` — written from that library's documented API but
+  not runtime-verified (no device/simulator available while drafting this).
+  Look for `TODO(native)` comments.
+
+## Apple Music: WebView, not native
+
+Apple Music does **not** use a native adapter here. Choosing "Continue with
+Apple Music" on the platform picker navigates straight to
+`AppleMusicWebViewScreen`, which embeds the already-deployed web app (its own
+login, room chooser, and room view all render inside that one WebView) via
+`react-native-webview`. This sidesteps the native MusicKit framework
+entirely — see `/MOBILE_V2_PLAN.md` for why: EAS Build's (and even plain
+Xcode's) automatic provisioning has a confirmed, unresolved gap in handling
+MusicKit's required "App Services"-tier entitlement. `react-native-webview`
+is one of the most widely-used RN libraries (no library-trust concern like
+the native MusicKit wrapper it replaces had), and this approach works
+identically on iOS and Android, which also eliminates the original plan's
+separate "Android + Apple Music needs a custom native module" phase.
 
 ## Setup (not yet run/verified in this environment)
 
@@ -32,9 +48,9 @@ npx expo prebuild     # generates native ios/ and android/ projects
 npx eas login          # needed for cloud builds — see below
 ```
 
-This app uses native modules (Spotify/Apple Music SDKs), so **Expo Go won't
-work** — it can't load arbitrary native code. You need a **development
-build** instead:
+This app uses a native module (Spotify's App Remote SDK) plus
+`react-native-webview` for Apple Music, so **Expo Go won't work** — it can't
+load arbitrary native code. You need a **development build** instead:
 
 ```
 eas build --profile development --platform ios
@@ -51,8 +67,8 @@ membership ($99/yr) for code signing — no way around that part.
 
 ## Testing reality check
 
-MusicKit (Apple Music) does not work in the iOS Simulator at all — only a
-real device, with a real Apple Music subscription. Spotify's App Remote SDK
-similarly expects the real Spotify app to be installed. Neither of the two
-native adapters in this scaffold can be meaningfully tested without physical
-device access, which wasn't available while this was drafted.
+Spotify's App Remote SDK expects the real Spotify app to be installed, so
+`src/platform/spotifyAdapter.ts` can't be meaningfully tested without
+physical device access, which wasn't available while this was drafted. The
+Apple Music WebView path has no such constraint in principle (it's just a
+web view), but is likewise unverified here.

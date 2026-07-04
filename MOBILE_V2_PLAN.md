@@ -36,33 +36,57 @@ Recommendation: **`apps/mobile/`** in this monorepo, not a new repo.
   release cadence, a different team, or you want the option to open-source one
   without the other. None of that applies today.
 
-## Platform support matrix (this is the part most likely to surprise you)
+## Platform support matrix (revised — see "Apple Music pivot" below)
 
 | | Spotify | Apple Music |
 |---|---|---|
-| iOS | ✅ App Remote SDK, wrapped by a maintained Expo module | ✅ Native MusicKit, wrapped by a maintained RN module |
-| Android | ✅ App Remote SDK, same wrapped module as iOS | ⚠️ Apple ships an official native Android MusicKit SDK — but no maintained RN wrapper exists. Real native module work (Kotlin), not a quick add. |
+| iOS | ✅ App Remote SDK, wrapped by a maintained Expo module | ✅ WebView embedding the deployed web app (MusicKit JS) |
+| Android | ✅ App Remote SDK, same wrapped module as iOS | ✅ Same WebView approach — identical on both platforms |
 
-The Android+Apple Music cell is the one worth flagging explicitly: I'd
-assumed going in that Apple Music simply wasn't available on Android at all.
-That's wrong — Apple publishes an actual **MusicKit for Android** SDK
-(`developer.apple.com/musickit/android/`) with an Authentication library and a
-Media Playback library that plays Apple Music content natively, controllable
-from the lock screen/background, same shape as Spotify's App Remote (it talks
-to the installed Apple Music app, not fully standalone without it). It's real
-and usable — there's just no existing React Native wrapper for it, meaning
-supporting it means writing one (a Kotlin native module bridging Apple's AAR),
-not just installing a library like every other cell in this table.
+This table used to have an Android+Apple Music gap requiring a custom native
+module (a "Phase 2," scoped separately, since Apple ships an official
+**MusicKit for Android** SDK but no maintained React Native wrapper for it).
+The WebView pivot below eliminates that gap entirely: Apple Music now works
+the same way on both platforms, in Phase 1, with no native module at all.
 
-**Recommended phasing**, given that:
-- **Phase 1**: iOS (Spotify + Apple Music) and Android (Spotify only). This
-  covers the two "just wrap an existing maintained library" platforms plus the
-  one where wrapping doesn't exist yet for the fourth.
-- **Phase 2**: Android + Apple Music, via a custom native module. Scope this
-  separately once Phase 1 is proven out — it's a distinct, nontrivial chunk of
-  native Android work, not a natural extension of Phase 1's wiring.
-- Until Phase 2, an Android user who wants Apple Music can still use the web
-  app in their mobile browser — same experience as today, not a regression.
+## Apple Music pivot: WebView instead of the native MusicKit framework
+
+**Original plan** (superseded): `@lomray/react-native-apple-music` wrapping
+Apple's native iOS MusicKit framework. Revisited this after noticing its low
+star count (~50 combined with the Spotify wrapper) raised a fair
+library-trust question. Star count wasn't actually the real problem, though —
+digging into its open issues surfaced a **confirmed, unresolved GitHub issue**
+showing that Apple's native MusicKit framework requires the
+`com.apple.developer.musickit` **"App Services"-tier entitlement**, and EAS
+Build's (and even plain Xcode's) automatic provisioning profile generation has
+a genuine, currently-unresolved gap in handling that entitlement correctly.
+That's an Apple/tooling-level problem, not a bug in the wrapper library
+itself — no version bump or maintainer fix would resolve it.
+
+**New approach**: skip the native MusicKit framework entirely. The web app's
+MusicKit JS flow (Developer Token + `authorize()`, no code-signing or
+entitlement concept at all — a completely different, unrelated auth system
+from the native framework) already works, is already deployed, and is already
+proven end-to-end. So the native mobile app embeds it directly: choosing
+"Continue with Apple Music" in the native platform picker navigates straight
+to a screen that renders the deployed web app inside a `react-native-webview`
+WebView — same login, same room chooser, same room view, same sync engine,
+running exactly as it does in a mobile browser today. No native module, no
+entitlement, no provisioning gap.
+
+This has two knock-on benefits:
+- It directly answers the original library-trust concern:
+  `react-native-webview` is one of the most widely-used libraries in the RN
+  ecosystem — nothing like the ~50-star native MusicKit wrapper it replaces.
+- It works identically on iOS and Android, which is why the platform matrix
+  above no longer has an Android+Apple Music gap — the "Phase 2: custom
+  native module" work this plan originally called for is no longer needed.
+
+The Spotify side of this plan is unaffected: it still goes through the native
+App Remote SDK (no entitlement issue there — it's a third-party SDK talking
+to the separately-installed Spotify app via URL scheme, not gated by Apple's
+provisioning tooling), which is the actual reason a native app is worth
+building in the first place (see "Why this exists" above).
 
 ## Tech stack
 
@@ -80,14 +104,11 @@ not just installing a library like every other cell in this table.
   source) rather than waiting on someone else. **Do not use
   `react-native-spotify-remote`** — confirmed unmaintained, it's the
   predecessor this newer module was written to replace.
-- **`@lomray/react-native-apple-music`** for Apple Music on iOS — actively
-  maintained (as of April 2026), supports React Native's New Architecture.
-  Real constraint worth knowing now: **MusicKit does not work in the iOS
-  Simulator** — every bit of Apple Music testing needs an actual device. This
-  matters for how you'll validate this work; I can't run a simulator or
-  device from here at all, so none of the native SDK wiring in this plan has
-  been runtime-tested by me, only written from the libraries' documented
-  APIs. Budget real device-testing time before trusting it.
+- **`react-native-webview`** for Apple Music, on both iOS and Android — embeds
+  the deployed web app's already-working MusicKit JS flow instead of a native
+  MusicKit framework wrapper. See "Apple Music pivot" above for why. One of
+  the most widely-used RN libraries, so no library-trust concern here the way
+  there was with the native wrapper it replaces.
 - **React Navigation** for screen flow — standard, unopinionated choice,
   nothing platform-specific about this pick.
 - Relay/protocol: **unchanged**. `packages/shared`'s `RelayEvent`/`RoomState`
@@ -96,15 +117,17 @@ not just installing a library like every other cell in this table.
 
 ## Architecture
 
-Mirrors the web app's shape, swapping the browser-specific pieces for native
-equivalents:
+Mirrors the web app's shape for the Spotify path, swapping the browser-specific
+pieces for native equivalents; Apple Music is the WebView exception described
+above.
 
 - `PlaybackAdapter` interface (already exists in `apps/web/src/platform/adapter.ts`)
-  gets a mobile-native implementation instead of the Web API/MusicKit-JS one —
-  same shape (`getState`, `play`, `pause`, `seek`, `search`, `resolveByIsrc`,
+  gets a mobile-native implementation for Spotify only — same shape
+  (`getState`, `play`, `pause`, `seek`, `search`, `resolveByIsrc`,
   `enqueueUpcoming`), different backing calls (native SDK methods instead of
-  `fetch()`/`MusicKit.js`). The interface doesn't need to change; only what
-  implements it does.
+  `fetch()`). The interface doesn't need to change; only what implements it
+  does. There is no Apple Music adapter — the WebView owns its own auth/sync
+  state internally, exactly as the web app does in a mobile browser.
 - The actual sync engine logic (`useRoomSync`'s reconciliation, drift
   correction, auto-advance) is UI-framework-agnostic already — it's plain
   TypeScript operating on the adapter interface and the relay connection, no
@@ -112,26 +135,32 @@ equivalents:
   into `packages/shared` or a new `packages/sync-core`** so both the web app
   and the mobile app import the same reconciliation logic instead of
   maintaining two copies that can silently drift apart. Not done yet on this
-  branch — flagged as the highest-value next step, see Open Questions.
-- Screens mirror the web app's flow 1:1 for Phase 1 (see scaffold below):
-  platform picker → platform login/device setup → room chooser → room view
-  (now playing, progress bar, seek, search, queue, activity log).
+  branch — flagged as the highest-value next step, see Open Questions. This
+  only applies to the Spotify path; Apple Music's WebView reuses the web app's
+  sync engine directly, by definition.
+- Screens mirror the web app's flow 1:1 for the Spotify path (platform picker
+  → login → room chooser → room view — now playing, progress bar, seek,
+  search, queue, activity log). Apple Music instead jumps straight from the
+  platform picker to the WebView screen.
 
 ## What's actually scaffolded on this branch right now
 
 - `apps/mobile/` — a new Expo/TypeScript workspace, added to the root
   `package.json` workspaces array.
 - Navigation + screen **stubs** matching the web app's flow, with real UI but
-  fake/no-op data — no native SDK wiring attempted blind. Wiring real Spotify
-  App Remote / MusicKit calls without a device to test against risks writing
-  plausible-looking code that's actually wrong in ways neither of us would
-  catch until real device testing — worse than an honest stub.
+  fake/no-op data for the Spotify path — no native SDK wiring attempted
+  blind. Wiring real Spotify App Remote calls without a device to test
+  against risks writing plausible-looking code that's actually wrong in ways
+  neither of us would catch until real device testing — worse than an honest
+  stub.
 - A typed `MobilePlaybackAdapter`-shaped interface file mirroring the web
-  app's, with clear `// TODO(native)` markers at every point real SDK calls
-  need to go in.
+  app's, with clear `// TODO(native)` markers at every point real Spotify SDK
+  calls need to go in.
+- `AppleMusicWebViewScreen.tsx` — real, working code (not a stub): renders
+  the deployed web app in a `react-native-webview` WebView.
 - `.env.example` for the mobile app's own config needs (Spotify client ID —
   reusable from the existing app, redirect URI scheme — new, needs
-  registering).
+  registering; deployed web app URL for the Apple Music WebView).
 
 ## Open questions — need your input before this goes further
 
@@ -140,8 +169,9 @@ equivalents:
    maintain from day one; doing it after means faster visible progress on the
    mobile app itself. No wrong answer, just needs a call.
 2. **Apple Developer Program enrollment** ($99/year) — needed for any real
-   iOS device testing, MusicKit entitlements, and App Store distribution.
-   Nothing past Phase 1 scaffolding can be verified without this.
+   iOS device testing and App Store distribution (code signing, regardless of
+   the MusicKit entitlement question the WebView pivot sidesteps). Nothing
+   past Phase 1 scaffolding can be verified without this.
 3. **Google Play developer account** ($25 one-time) — needed for Android
    distribution; Android *development* builds don't strictly require it.
 4. **Spotify's app review** — production use of the App Remote SDK at scale
@@ -150,8 +180,10 @@ equivalents:
 5. **EAS account** — needed to actually run cloud builds. Free tier exists
    with build-count limits; check whether that's sufficient for your expected
    iteration pace.
-6. **Real device access** — I have none. All native-SDK-touching code on this
-   branch is unverified beyond "it typechecks and matches the libraries'
-   documented API shape." This is the single biggest gap between "drafted"
-   and "working" here — flagging it clearly rather than overstating what's
-   been done.
+6. **Real device access** — I have none. The Spotify adapter is unverified
+   beyond "it typechecks and matches the library's documented API shape."
+   This is the single biggest gap between "drafted" and "working" for that
+   path — flagging it clearly rather than overstating what's been done. The
+   Apple Music WebView path has a smaller version of the same gap: unverified
+   in a real dev-client build, though it carries much less risk since it's
+   just a web view pointed at code that already works.
