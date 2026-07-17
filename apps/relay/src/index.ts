@@ -5,6 +5,7 @@ import { config } from "dotenv";
 import { WebSocketServer, WebSocket } from "ws";
 import type { RelayEvent } from "@spotifyapple/shared";
 import { getAppleDeveloperToken } from "./appleToken.js";
+import { exchangeSpotifyCode, SpotifyTokenSwapError } from "./spotifyTokenSwap.js";
 import {
   applyGoto,
   applyQueueAdd,
@@ -45,6 +46,15 @@ function broadcastSync(room: Room): void {
   broadcast(room, { type: "room:sync", state: room.state });
 }
 
+function readBody(req: import("node:http").IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
 const httpServer = createServer((req, res) => {
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
@@ -67,6 +77,26 @@ const httpServer = createServer((req, res) => {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: (err as Error).message }));
     }
+    return;
+  }
+  // apps/mobile's native Spotify login (@wwdrew/expo-spotify-sdk) POSTs the
+  // authorization code here as x-www-form-urlencoded (its own hardcoded
+  // request shape — see spotifyTokenSwap.ts's comment) and expects Spotify's
+  // raw token JSON straight back.
+  if (req.method === "POST" && req.url === "/spotify/token-swap") {
+    void (async () => {
+      try {
+        const body = await readBody(req);
+        const code = new URLSearchParams(body).get("code");
+        if (!code) throw new SpotifyTokenSwapError("Missing 'code' in request body");
+        const token = await exchangeSpotifyCode(code);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(token));
+      } catch (err) {
+        res.writeHead(err instanceof SpotifyTokenSwapError ? 400 : 500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: (err as Error).message }));
+      }
+    })();
     return;
   }
   res.writeHead(404);

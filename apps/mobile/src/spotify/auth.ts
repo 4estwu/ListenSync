@@ -8,13 +8,31 @@ import { Authenticate, isAvailable } from '@wwdrew/expo-spotify-sdk'
 // Keystore-backed), not AsyncStorage — this holds an access token, worth the
 // extra step over plain unencrypted storage.
 //
-// UNVERIFIED: the actual native authenticateAsync() call has not been
-// exercised on a device (no device/simulator access while writing this).
-// Everything downstream of getting an access token (spotify/player.ts,
-// platform/spotifyAdapter.ts) is a straight port of apps/web's already-
-// tested REST logic, so the real risk is concentrated in this file's
-// authenticateAsync() call and SecureStore usage, not the playback logic.
+// CONFIRMED on a real device (2026-07-17): calling authenticateAsync()
+// without a tokenSwapURL fails after 2FA with "response type must be code".
+// Root cause, found by reading the library's own Android source
+// (ExpoSpotifySDKModule.kt): it only requests response_type=code when
+// tokenSwapURL/tokenRefreshURL is set; otherwise it requests
+// response_type=token (implicit grant), which Spotify's authorization
+// server now rejects outright — Spotify deprecated implicit grant. So
+// tokenSwapURL isn't optional config, it's the only way this library can
+// authenticate at all. The relay's /spotify/token-swap route (see
+// apps/relay/src/spotifyTokenSwap.ts) implements the exact request shape
+// the library's Kotlin source sends: a bare `code` param, expecting
+// Spotify's raw token JSON straight back.
+//
+// tokenRefreshURL is deliberately NOT passed here — the same Kotlin source
+// only implements the tokenSwapURL call; there is no refresh-token HTTP
+// call anywhere in the Android module, so passing tokenRefreshURL would
+// silently do nothing on this platform. See ensureFreshToken below for the
+// current refresh story.
 const TOKEN_KEY = 'spotify_token'
+
+// process.env, not EXPO_PUBLIC_RELAY_URL's own ws(s):// scheme — the relay
+// serves plain HTTP alongside the WebSocket upgrade on the same port (see
+// apps/relay/src/index.ts), so the token-swap POST just needs the scheme
+// swapped.
+const TOKEN_SWAP_URL = (process.env.EXPO_PUBLIC_RELAY_URL ?? 'ws://127.0.0.1:8787').replace(/^ws/, 'http') + '/spotify/token-swap'
 
 // user-read-playback-state / user-modify-playback-state / user-read-currently-playing:
 // read/control an existing external Spotify Connect device — this app
@@ -62,7 +80,7 @@ export async function logout(): Promise<void> {
  * persists the resulting session.
  */
 export async function authenticate(): Promise<SpotifyToken> {
-  const session = await Authenticate.authenticateAsync({ scopes: [...SCOPES] })
+  const session = await Authenticate.authenticateAsync({ scopes: [...SCOPES], tokenSwapURL: TOKEN_SWAP_URL })
   const token: SpotifyToken = {
     accessToken: session.accessToken,
     refreshToken: session.refreshToken,
@@ -73,17 +91,14 @@ export async function authenticate(): Promise<SpotifyToken> {
 }
 
 /**
- * Unlike apps/web's PKCE-based refresh (no client secret needed, so it can
- * silently re-mint a token from `accounts.spotify.com` on its own), this
- * native SDK's refresh_token — per its own docs — requires a server-side
- * token-refresh proxy holding the app's client secret (a `tokenRefreshURL`
- * passed to authenticateAsync(), not implemented here) to use safely. Without
- * one, there's no secure way to refresh in-app, so an expired token just
- * surfaces as "log in again" rather than silently failing later. This is a
- * known, deliberate gap — see MOBILE_V2_PLAN.md — not an oversight; adding a
- * relay-hosted refresh endpoint (mirroring the existing Apple developer-token
- * endpoint's pattern) is the natural next step if session length in testing
- * turns out to matter.
+ * No silent refresh: reading the library's Android source (see the top of
+ * this file) confirmed there is no tokenRefreshURL HTTP call implemented at
+ * all on this platform — only the initial code-swap is wired up. So even
+ * with a relay endpoint standing by, this native SDK has no code path that
+ * would call it. An expired token just surfaces as "log in again" rather
+ * than silently failing later. Known, deliberate gap — see
+ * MOBILE_V2_PLAN.md — not an oversight; revisit if iOS's Swift module turns
+ * out to implement refresh differently, or if this library adds it later.
  */
 export function ensureFreshToken(token: SpotifyToken): SpotifyToken {
   if (Date.now() >= token.expiresAt - 30_000) {
