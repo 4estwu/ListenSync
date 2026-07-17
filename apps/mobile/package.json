@@ -2,7 +2,7 @@
   "name": "@spotifyapple/mobile",
   "version": "0.0.1",
   "private": true,
-  "main": "node_modules/expo/AppEntry.js",
+  "main": "expo/AppEntry",
   "scripts": {
     "start": "expo start --dev-client",
     "android": "expo run:android",
