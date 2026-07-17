@@ -2,7 +2,7 @@
   "name": "@spotifyapple/mobile",
   "version": "0.0.1",
   "private": true,
-  "main": "expo/AppEntry",
+  "main": "index.ts",
   "scripts": {
     "start": "expo start --dev-client",
     "android": "expo run:android",

@@ -15,5 +15,5 @@
     // entirely), so it's safe to bump without touching runtime behavior.
     "module": "esnext"
   },
-  "include": ["src", "App.tsx"]
+  "include": ["src", "App.tsx", "index.ts"]
 }
