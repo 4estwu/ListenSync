@@ -5,9 +5,18 @@ import type { QueueItem, RelayEvent, RoomState, Track } from '@spotifyapple/shar
 import { connectRoom, type RelayConnection } from '../relay/client'
 import { AdapterDeviceError, type AdapterPlaybackState, type PlaybackAdapter } from '../platform/adapter'
 import { useRoomSync } from './useRoomSync'
+import { hasUserGesture } from './userGesture'
 
 vi.mock('../relay/client', () => ({
   connectRoom: vi.fn(),
+}))
+
+// Defaults to "already interacted" so the existing tests below — none of
+// which are testing the gesture gate itself — don't all have to separately
+// simulate a click just to let a track-switch/resume correction go through.
+// The dedicated gesture-gate tests override this per-test.
+vi.mock('./userGesture', () => ({
+  hasUserGesture: vi.fn(() => true),
 }))
 
 function makeTrack(overrides: Partial<Track> = {}): Track {
@@ -51,7 +60,11 @@ function createFakeAdapter(overrides: Partial<PlaybackAdapter> = {}): PlaybackAd
 function createFakeConnection() {
   let messageHandler: ((event: RelayEvent) => void) | null = null
   const conn: RelayConnection = {
-    send: vi.fn(),
+    // Defaults to the real send()'s successful-delivery return value — a
+    // bare vi.fn() returns undefined (falsy), which would silently exercise
+    // the "message didn't go anywhere" branch in every test using this
+    // helper without them realizing it.
+    send: vi.fn(() => true),
     onMessage: vi.fn((cb) => {
       messageHandler = cb
     }),
@@ -391,4 +404,349 @@ describe('useRoomSync', () => {
 
     expect(fake.conn.send).toHaveBeenCalledWith({ type: 'playback:pause', positionMs: 0 })
   })
+
+  it(
+    'reports the corrected position after a drift-fix seek, not the stale pre-correction reading — ' +
+      'regression: with a single client in the room, that client\'s own report is the sole source of ' +
+      'canonical state, so reporting the stale reading re-anchored state back to the position just ' +
+      'corrected away from, guaranteeing the next poll saw "drift" again and corrected the opposite way ' +
+      '— an oscillation (skip back, skip forward) repeating every poll, not two independent bugs',
+    async () => {
+      const getState = vi.fn()
+      const adapter = createFakeAdapter({ getState })
+      const fake = createFakeConnection()
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      const matchingPositionMs = 5000
+      getState.mockResolvedValue(
+        makePlaybackState({ isPlaying: true, positionMs: matchingPositionMs, durationMs: 200_000, platformId: 'spotify:track:abc' }),
+      )
+
+      renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      const helloState = makeState({
+        currentIndex: 0,
+        isPlaying: true,
+        positionMs: matchingPositionMs,
+        updatedAt: Date.now(),
+        queue: [makeQueueItem('a')],
+      })
+      await act(async () => {
+        fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: helloState })
+      })
+      expect(adapter.seek).not.toHaveBeenCalled() // sanity: nothing to correct yet
+
+      // By the next poll, the device reads well behind where canonical state
+      // says it should be — this stale reading is what getState() keeps
+      // returning even after the correction below is issued (a real device
+      // wouldn't actually seek instantaneously either).
+      const staleReadingMs = 10_000
+      getState.mockResolvedValue(
+        makePlaybackState({ isPlaying: true, positionMs: staleReadingMs, durationMs: 200_000, platformId: 'spotify:track:abc' }),
+      )
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000) // fires the first scheduled poll tick
+      })
+
+      expect(adapter.seek).toHaveBeenCalledTimes(1)
+      const correctedTarget = (adapter.seek as Mock).mock.calls[0][0] as number
+      expect(correctedTarget).not.toBe(staleReadingMs)
+
+      const reportCalls = (fake.conn.send as Mock).mock.calls
+        .map((call) => call[0] as RelayEvent)
+        .filter((event) => event.type === 'playback:report')
+      expect(reportCalls.length).toBeGreaterThan(0)
+      for (const report of reportCalls) {
+        expect((report as { positionMs: number }).positionMs).not.toBe(staleReadingMs)
+      }
+      expect((reportCalls[reportCalls.length - 1] as { positionMs: number }).positionMs).toBe(correctedTarget)
+    },
+  )
+
+  it(
+    'does not start playback without a user gesture (browser autoplay policy) — regression: an ' +
+      'auto-restored login + auto-rejoined room (see App.tsx session persistence) meant this could be ' +
+      'the first thing that happens on a fresh page load, with no click yet to unlock audio, surfacing ' +
+      'as Chrome\'s "play() failed because the user didn\'t interact with the document first"',
+    async () => {
+      vi.mocked(hasUserGesture).mockReturnValue(false)
+
+      const adapter = createFakeAdapter()
+      const fake = createFakeConnection()
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      const { result } = renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      await act(async () => {
+        fake.emit({
+          type: 'hello',
+          clientId: 'me',
+          isHost: true,
+          state: makeState({ currentIndex: 0, isPlaying: true, queue: [makeQueueItem('a')] }),
+        })
+      })
+
+      expect(adapter.play).not.toHaveBeenCalled()
+      expect(result.current.needsGesture).toBe(true)
+
+      // Simulates the user tapping the "Tap to resume playback" prompt.
+      vi.mocked(hasUserGesture).mockReturnValue(true)
+      await act(async () => {
+        result.current.retryPlayback()
+        await vi.advanceTimersByTimeAsync(0)
+      })
+
+      expect(adapter.play).toHaveBeenCalledWith('spotify:track:abc', expect.any(Number))
+      expect(result.current.needsGesture).toBe(false)
+    },
+  )
+
+  it('does not gate a drift-fix seek or a pause behind a user gesture — only starting new audio needs one', async () => {
+    vi.mocked(hasUserGesture).mockReturnValue(false)
+
+    const adapter = createFakeAdapter({
+      getState: vi.fn().mockResolvedValue(
+        makePlaybackState({ isPlaying: true, positionMs: 10_000, durationMs: 200_000, platformId: 'spotify:track:abc' }),
+      ),
+    })
+    const fake = createFakeConnection()
+    vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+    renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+    await act(async () => {
+      fake.emit({
+        type: 'hello',
+        clientId: 'me',
+        isHost: true,
+        state: makeState({
+          currentIndex: 0,
+          isPlaying: true,
+          positionMs: 5000,
+          updatedAt: Date.now() - 20_000, // canonical says this should be well past 10_000 by now
+          queue: [makeQueueItem('a')],
+        }),
+      })
+    })
+
+    // Same track, already playing — a pure drift-fix seek, not a play() call — should proceed even with no gesture.
+    expect(adapter.seek).toHaveBeenCalled()
+    expect(adapter.play).not.toHaveBeenCalled()
+
+    vi.mocked(hasUserGesture).mockReturnValue(true)
+  })
+
+  function nearEndState(overrides: Partial<RoomState> = {}) {
+    return makeState({
+      currentIndex: 0,
+      isPlaying: true,
+      positionMs: 199_500,
+      updatedAt: Date.now(),
+      queue: [makeQueueItem('a'), makeQueueItem('b')],
+      ...overrides,
+    })
+  }
+
+  it(
+    'recovers immediately when the auto-advance goto fails to send (e.g. mid connectivity gap), instead of ' +
+      "getting stuck for the rest of the session — regression: conn.send() used to silently no-op with no " +
+      'feedback, so the "pending" guard never cleared once a goto was lost this way',
+    async () => {
+      const adapter = createFakeAdapter({
+        getState: vi
+          .fn()
+          .mockResolvedValue(makePlaybackState({ isPlaying: true, positionMs: 199_500, durationMs: 200_000, platformId: 'spotify:track:abc' })),
+      })
+      const fake = createFakeConnection()
+      vi.mocked(fake.conn.send).mockReturnValue(false) // socket not open right now
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      await act(async () => {
+        fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: nearEndState() })
+      })
+
+      // The very first poll tick is always scheduled at SLOW_POLL_MS from
+      // mount, before any tick has run to notice the state is actually near
+      // a boundary — only ticks scheduled *after* that recompute the
+      // interval, landing on FAST_POLL_MS from then on.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000)
+      })
+      let gotoCalls = (fake.conn.send as Mock).mock.calls.filter((c) => (c[0] as RelayEvent).type === 'playback:goto')
+      expect(gotoCalls.length).toBe(1)
+
+      // Connectivity's back — the very next tick should retry immediately,
+      // not wait out the full stuck-detection timeout.
+      vi.mocked(fake.conn.send).mockReturnValue(true)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+      gotoCalls = (fake.conn.send as Mock).mock.calls.filter((c) => (c[0] as RelayEvent).type === 'playback:goto')
+      expect(gotoCalls.length).toBe(2)
+    },
+  )
+
+  it(
+    'recovers via a timeout if a "successful" auto-advance goto is never confirmed by a room:sync ' +
+      '(e.g. the broadcast itself was lost) — same stuck-forever failure mode as a failed send, just ' +
+      'subtler since conn.send() itself reported success',
+    async () => {
+      const adapter = createFakeAdapter({
+        getState: vi
+          .fn()
+          .mockResolvedValue(makePlaybackState({ isPlaying: true, positionMs: 199_500, durationMs: 200_000, platformId: 'spotify:track:abc' })),
+      })
+      const fake = createFakeConnection() // send() defaults to reporting success
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      await act(async () => {
+        fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: nearEndState() })
+      })
+
+      // First tick is always at SLOW_POLL_MS from mount (see the previous
+      // test's comment) — this is when the pending goto is actually sent.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000)
+      })
+      let gotoCalls = (fake.conn.send as Mock).mock.calls.filter((c) => (c[0] as RelayEvent).type === 'playback:goto')
+      expect(gotoCalls.length).toBe(1)
+
+      // No confirming room:sync ever arrives. Well within the timeout
+      // window (3s elapsed since the pending goto), repeated polls should
+      // not resend.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000)
+      })
+      gotoCalls = (fake.conn.send as Mock).mock.calls.filter((c) => (c[0] as RelayEvent).type === 'playback:goto')
+      expect(gotoCalls.length).toBe(1)
+
+      // Past AUTO_ADVANCE_PENDING_TIMEOUT_MS (8s) since the pending goto was
+      // sent (3000 + 6000 = 9000ms elapsed since it was set), the next poll
+      // should retry rather than staying stuck forever.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6000)
+      })
+      gotoCalls = (fake.conn.send as Mock).mock.calls.filter((c) => (c[0] as RelayEvent).type === 'playback:goto')
+      expect(gotoCalls.length).toBe(2)
+    },
+  )
+
+  it('sends playback:pause (not another playback:goto) when the track that just ended was the last one in the queue', async () => {
+    const adapter = createFakeAdapter({
+      getState: vi
+        .fn()
+        .mockResolvedValue(makePlaybackState({ isPlaying: true, positionMs: 199_500, durationMs: 200_000, platformId: 'spotify:track:abc' })),
+    })
+    const fake = createFakeConnection()
+    vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+    renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+    // Single-item queue — the track that's ending is the only (and thus
+    // last) one, so there's no nextIndex to advance to.
+    await act(async () => {
+      fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: nearEndState({ queue: [makeQueueItem('a')] }) })
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000) // first tick is always at SLOW_POLL_MS from mount
+    })
+
+    // Not asserting the exact positionMs sent with the pause — reconcile()'s
+    // own drift correction (see the earlier oscillation fix) can legitimately
+    // adjust it before the reporter block runs; goto-vs-pause is the point
+    // of this test, not exact position tracking.
+    const sentTypes = (fake.conn.send as Mock).mock.calls.map((c) => (c[0] as RelayEvent).type)
+    expect(sentTypes).toContain('playback:pause')
+    expect(sentTypes).not.toContain('playback:goto')
+  })
+
+  it('sends playback:pause when the *last* track of a multi-item queue ends, not just a single-item queue', async () => {
+    const adapter = createFakeAdapter({
+      getState: vi
+        .fn()
+        .mockResolvedValue(makePlaybackState({ isPlaying: true, positionMs: 199_500, durationMs: 200_000, platformId: 'spotify:track:b' })),
+    })
+    const fake = createFakeConnection()
+    vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+    renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+    await act(async () => {
+      fake.emit({
+        type: 'hello',
+        clientId: 'me',
+        isHost: true,
+        state: nearEndState({
+          currentIndex: 1, // "b" — the second and last item
+          queue: [
+            makeQueueItem('a', { track: makeTrack({ platformIds: { spotify: 'spotify:track:a' } }) }),
+            makeQueueItem('b', { track: makeTrack({ platformIds: { spotify: 'spotify:track:b' } }) }),
+          ],
+        }),
+      })
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000)
+    })
+
+    const sentTypes = (fake.conn.send as Mock).mock.calls.map((c) => (c[0] as RelayEvent).type)
+    expect(sentTypes).toContain('playback:pause')
+    expect(sentTypes).not.toContain('playback:goto')
+  })
+
+  it(
+    'auto-advances to a newly-added song after pausing at the end of the queue, with no manual resume ' +
+      'needed — nextPollDelay keeps polling (just at SLOW_POLL_MS) while paused, and the reporter block\'s ' +
+      "trackEnded check isn't gated on isPlaying, so it naturally re-fires once queue.length grows past " +
+      'the still-“ended” current track',
+    async () => {
+      const adapter = createFakeAdapter({
+        // Device stays sitting at/near the end, exactly where it was when it
+        // paused — nothing about its own state changes on its own.
+        getState: vi
+          .fn()
+          .mockResolvedValue(makePlaybackState({ isPlaying: false, positionMs: 199_800, durationMs: 200_000, platformId: 'spotify:track:a' })),
+      })
+      const fake = createFakeConnection()
+      vi.mocked(connectRoom).mockReturnValue(fake.conn)
+
+      renderHook(() => useRoomSync({ roomId: 'ROOM1', adapter, onLog: vi.fn() }))
+
+      const trackA = makeQueueItem('a', { track: makeTrack({ platformIds: { spotify: 'spotify:track:a' } }) })
+      const pausedAtEnd = makeState({
+        currentIndex: 0,
+        isPlaying: false,
+        positionMs: 199_800,
+        updatedAt: Date.now(),
+        queue: [trackA],
+      })
+
+      await act(async () => {
+        fake.emit({ type: 'hello', clientId: 'me', isHost: true, state: pausedAtEnd })
+      })
+
+      // Someone adds a second song while the room sits paused at the end —
+      // simulates the room:sync a queue:add broadcast would produce.
+      const trackB = makeQueueItem('b', { track: makeTrack({ platformIds: { spotify: 'spotify:track:b' } }) })
+      await act(async () => {
+        fake.emit({ type: 'room:sync', state: { ...pausedAtEnd, queue: [trackA, trackB] } })
+      })
+
+      // Paused, so polling continues at SLOW_POLL_MS rather than stopping.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000)
+      })
+
+      const gotoCalls = (fake.conn.send as Mock).mock.calls.filter((c) => (c[0] as RelayEvent).type === 'playback:goto')
+      expect(gotoCalls.length).toBe(1)
+      expect((gotoCalls[0][0] as { index: number }).index).toBe(1)
+    },
+  )
 })

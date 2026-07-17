@@ -52,10 +52,23 @@ export async function lookupByIsrc(music: MusicKit.MusicKitInstance, isrc: strin
   return song ? toSummary(song) : null
 }
 
+/**
+ * Only calls setQueue() when catalogId is actually different from what's
+ * already loaded — re-queuing a song that's already playing turned out to be
+ * actively destabilizing, not just redundant: nowPlayingItem going briefly
+ * null right after setQueue is apparently normal MusicKit JS behavior (an
+ * async internal settling window), but useRoomSync's needsTrackSwitch reads
+ * that null and, believing nothing is loaded, calls play() again — which
+ * re-queues the SAME song, restarting that settling window before it
+ * finished, so nowPlayingItem never gets the chance to actually settle. That
+ * repeating cycle (visible as "switched to X, was playing nothing" every
+ * ~3-4s in the log, bounded by useRoomSync's correction cooldown) is what
+ * read to the user as the track looping — this was the cause, not a symptom.
+ */
 export async function play(music: MusicKit.MusicKitInstance, catalogId?: string, positionMs?: number): Promise<void> {
-  if (catalogId) {
+  if (catalogId && music.nowPlayingItem?.id !== catalogId) {
     await music.setQueue({ song: catalogId, startPlaying: true })
-  } else {
+  } else if (!music.isPlaying) {
     await music.play()
   }
   if (positionMs !== undefined) await music.seekToTime(positionMs / 1000)

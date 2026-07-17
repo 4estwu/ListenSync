@@ -3,6 +3,7 @@ import type { QueueItem, RelayEvent, RoomState, Track } from '@spotifyapple/shar
 import { connectRoom, type RelayConnection } from '../relay/client'
 import { AdapterDeviceError, type AdapterPlaybackState, type PlaybackAdapter } from '../platform/adapter'
 import { resolveTrackUri } from './resolveTrack'
+import { hasUserGesture } from './userGesture'
 
 // crypto.randomUUID() requires a secure context (HTTPS or localhost/127.0.0.1)
 // and is simply undefined otherwise — e.g. loading this app from a LAN IP over
@@ -29,6 +30,20 @@ const BOUNDARY_WINDOW_MS = 5000 // within this many ms of a track's start or end
 // correction actually closes that gap afterward, instead of quietly
 // tolerating it forever.
 const DRIFT_THRESHOLD_MS = 400
+// Apple's MusicKit JS only updates currentPlaybackTime roughly once per
+// second (a documented characteristic of the SDK, not something this app
+// controls) — apple/player.ts's getPlaybackState() multiplies that by 1000,
+// so every reading lands on an exact multiple of 1000ms. Comparing that
+// against a continuously-elapsing expected position means up to ~1000ms of
+// apparent "drift" shows up organically within any given second, even with
+// zero real drift. Spotify's progress_ms doesn't have this quantization, so
+// only Apple needs the wider tolerance — using the tight threshold for both
+// meant Apple corrected almost every poll, chasing measurement noise rather
+// than real drift.
+const DRIFT_THRESHOLD_MS_BY_PLATFORM: Record<PlaybackAdapter['platform'], number> = {
+  spotify: DRIFT_THRESHOLD_MS,
+  apple: 1300,
+}
 const CORRECTION_COOLDOWN_MS = 3000
 const TRACK_END_EPSILON_MS = 800
 const INITIAL_LATENCY_ESTIMATE_MS = 250 // seed guess before any real measurement exists
@@ -38,6 +53,13 @@ const LATENCY_EMA_WEIGHT = 0.3 // how much each new measurement moves the rollin
 // separate API call, and the goal is resilience against this tab dying, not
 // exhaustively replicating a long queue.
 const MAX_QUEUE_MIRROR = 10
+// Safety net for the reporter's auto-advance pending guard (see
+// autoAdvancePendingRef below): a generous margin past any normal WS round
+// trip. If no confirming room:sync shows up within this window, assume the
+// goto/pause was lost — e.g. sent during a connectivity gap (a subway
+// tunnel, a brief WS reconnect) — and allow a retry, rather than leaving
+// auto-advance stuck for the rest of the session.
+const AUTO_ADVANCE_PENDING_TIMEOUT_MS = 8000
 
 interface UseRoomSyncArgs {
   roomId: string
@@ -52,6 +74,8 @@ export interface RoomSync {
   roomState: RoomState | null
   /** Set when this client's own device rejected a call as gone (see AdapterDeviceError); cleared automatically once a poll succeeds again. */
   deviceError: string | null
+  /** Set when a correction needs to start audio but no user gesture has happened yet this page load (browser autoplay policy) — clears itself once one does. */
+  needsGesture: boolean
   addToQueue: (track: Track, addedBy: string) => void
   removeFromQueue: (itemId: string) => void
   gotoIndex: (index: number) => void
@@ -59,6 +83,7 @@ export interface RoomSync {
   pause: () => void
   resume: () => void
   seekTo: (positionMs: number) => void
+  retryPlayback: () => void
 }
 
 /** Distance in ms to the current track's start or end, using only local canonical state — no API call needed to decide how urgently to poll. */
@@ -77,6 +102,7 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
   const [clientId, setClientId] = useState<string | null>(null)
   const [roomState, setRoomState] = useState<RoomState | null>(null)
   const [deviceError, setDeviceError] = useState<string | null>(null)
+  const [needsGesture, setNeedsGesture] = useState(false)
 
   const connRef = useRef<RelayConnection | null>(null)
   const roomStateRef = useRef<RoomState | null>(null)
@@ -91,7 +117,17 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
   // the same goto. The relay now ignores a redundant same-index goto too
   // (defense in depth), but suppressing the resend here also avoids the
   // pointless extra network chatter.
+  //
+  // Cleared three ways: a confirming room:sync arrives (the normal case),
+  // conn.send() itself reports the message never left (socket wasn't open),
+  // or AUTO_ADVANCE_PENDING_TIMEOUT_MS elapses with no confirmation either
+  // way (autoAdvancePendingAtRef) — without that last one, a goto lost to a
+  // connectivity gap (sent successfully into a socket that then drops before
+  // the relay's broadcast comes back, or genuinely dropped mid-air) left
+  // this permanently true, silently disabling auto-advance for the rest of
+  // the session with no way to recover short of a manual skip.
   const autoAdvancePendingRef = useRef(false)
+  const autoAdvancePendingAtRef = useRef(0)
   const resolvedUriCacheRef = useRef(new Map<string, string | null>())
   const lastUnresolvedItemIdRef = useRef<string | null>(null)
   // Rolling estimate of how long a play()/seek() call takes from decision to
@@ -210,9 +246,26 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
         const needsTrackSwitch = playback.platformId !== expectedUri
         const needsPlayPauseFix = !needsTrackSwitch && playback.isPlaying !== state.isPlaying
         const drift = !needsTrackSwitch && !needsPlayPauseFix && state.isPlaying ? Math.abs(playback.positionMs - expectedPositionMs) : 0
-        const needsDriftFix = drift > DRIFT_THRESHOLD_MS
+        const needsDriftFix = drift > DRIFT_THRESHOLD_MS_BY_PLATFORM[adapter.platform]
 
+        // Starting audio (a track switch, or resuming from paused) needs a
+        // real user gesture somewhere in this page load — browsers block it
+        // otherwise (Chrome: "play() failed because the user didn't interact
+        // with the document first"). This bit us specifically because of the
+        // session-persistence work: an auto-restored login + auto-rejoined
+        // room means this can be the very first thing that happens on a
+        // fresh page load, with no click yet to have unlocked it. Seeking or
+        // pausing don't start anything new, so they're not gated — only
+        // skipped (not failed-and-logged) so this retries cleanly the moment
+        // a gesture happens, instead of spamming "correction failed" every
+        // poll in the meantime.
+        const startsAudio = needsTrackSwitch || (needsPlayPauseFix && state.isPlaying)
+        if (startsAudio && !hasUserGesture()) {
+          setNeedsGesture(true)
+          return { playback, expectedUri }
+        }
         if (needsTrackSwitch || needsPlayPauseFix || needsDriftFix) {
+          setNeedsGesture(false)
           // Engage the cooldown before attempting, not after succeeding — a
           // *failed* correction (e.g. a 429) still needs to back off, or it
           // just retries every tick into an already-rate-limited API, which
@@ -239,13 +292,21 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
                   `latency est. ${Math.round(latencyEstimateMsRef.current)}ms)`,
               )
               void mirrorUpcomingQueue(state)
+              playback.positionMs = predictedPositionMs
+              playback.isPlaying = state.isPlaying
+              playback.platformId = expectedUri
             } else if (needsPlayPauseFix) {
-              if (state.isPlaying) await adapter.play(undefined, predictedPositionMs)
-              else await adapter.pause()
+              if (state.isPlaying) {
+                await adapter.play(undefined, predictedPositionMs)
+                playback.positionMs = predictedPositionMs
+              } else {
+                await adapter.pause()
+              }
               onLog(
                 `Sync: corrected ${state.isPlaying ? 'resume' : 'pause'} ` +
                   `(device reported isPlaying=${playback.isPlaying} at ${Math.round(playback.positionMs)}ms)`,
               )
+              playback.isPlaying = state.isPlaying
             } else {
               await adapter.seek(predictedPositionMs)
               onLog(
@@ -253,7 +314,20 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
                   `(device at ${Math.round(playback.positionMs)}ms, targeting ${Math.round(predictedPositionMs)}ms, ` +
                   `latency est. ${Math.round(latencyEstimateMsRef.current)}ms)`,
               )
+              playback.positionMs = predictedPositionMs
             }
+            // The report sent right after this (see tick()'s reporter block)
+            // uses this same returned `playback` object as ground truth. With
+            // only one client, that report IS the sole source of canonical
+            // state — reporting the pre-correction reading we started this
+            // function with would immediately re-anchor canonical state back
+            // to the position we just corrected away from, guaranteeing the
+            // *next* poll sees "drift" again and corrects the opposite way.
+            // That's an oscillation, not two independent bugs: skip back
+            // (this correction), skip forward (undoing it via a stale
+            // report), repeating every poll. Updating playback here to what
+            // we just told the device to do closes that loop.
+            lastKnownPositionRef.current = playback.positionMs
 
             // Refine the estimate from this call's actual round trip — only
             // when we applied compensation (a pause() call's timing isn't a
@@ -359,9 +433,11 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
         // paused seconds in because the leftover position/duration from the
         // *previous* track (which happened to be near its own end) looked
         // like "track ended" for the new one.
+        const autoAdvanceStillPending =
+          autoAdvancePendingRef.current && Date.now() - autoAdvancePendingAtRef.current < AUTO_ADVANCE_PENDING_TIMEOUT_MS
         if (
           isHostRef.current &&
-          !autoAdvancePendingRef.current &&
+          !autoAdvanceStillPending &&
           state.currentIndex >= 0 &&
           playback?.durationMs != null &&
           expectedUri &&
@@ -370,12 +446,16 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
           const trackEnded = playback.durationMs > 0 && playback.positionMs >= playback.durationMs - TRACK_END_EPSILON_MS
           if (trackEnded) {
             autoAdvancePendingRef.current = true
+            autoAdvancePendingAtRef.current = Date.now()
             const nextIndex = state.currentIndex + 1
-            if (nextIndex < state.queue.length) {
-              conn.send({ type: 'playback:goto', index: nextIndex })
-            } else {
-              conn.send({ type: 'playback:pause', positionMs: playback.positionMs })
-            }
+            const sent =
+              nextIndex < state.queue.length
+                ? conn.send({ type: 'playback:goto', index: nextIndex })
+                : conn.send({ type: 'playback:pause', positionMs: playback.positionMs })
+            // Definitely didn't go anywhere (socket wasn't open right now) —
+            // no reason to wait out the full timeout when we already know it
+            // failed; let the next tick try again immediately.
+            if (!sent) autoAdvancePendingRef.current = false
           } else {
             conn.send({ type: 'playback:report', positionMs: playback.positionMs })
           }
@@ -437,5 +517,29 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
     connRef.current?.send({ type: state.isPlaying ? 'playback:resume' : 'playback:pause', positionMs: clamped })
   }, [])
 
-  return { clientId, isHost, roomState, deviceError, addToQueue, removeFromQueue, gotoIndex, skipNext, pause, resume, seekTo }
+  // For the "tap to resume playback" prompt (see needsGesture): the click
+  // itself already satisfies hasUserGesture() by the time this runs (a
+  // document-level pointerdown listener fires before this button's own
+  // onClick does), so immediately retrying here — rather than waiting for
+  // the next scheduled poll, up to a few seconds away — is what makes
+  // tapping the prompt feel instant instead of laggy.
+  const retryPlayback = useCallback(() => {
+    if (roomStateRef.current) void reconcileRef.current(roomStateRef.current, { skipCooldown: true })
+  }, [])
+
+  return {
+    clientId,
+    isHost,
+    roomState,
+    deviceError,
+    needsGesture,
+    addToQueue,
+    removeFromQueue,
+    gotoIndex,
+    skipNext,
+    pause,
+    resume,
+    seekTo,
+    retryPlayback,
+  }
 }

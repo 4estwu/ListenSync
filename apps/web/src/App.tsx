@@ -5,12 +5,13 @@ import {
   ensureFreshToken,
   getStoredToken,
   handleRedirectCallback,
+  logout as logoutSpotify,
   redirectToAuthorize,
   type SpotifyToken,
 } from './spotify/auth'
 import { getDevices, type SpotifyDevice } from './spotify/player'
 import { connectWebPlaybackDevice } from './spotify/webPlayback'
-import { authorizeAppleMusic, getMusicKit } from './apple/musicKit'
+import { authorizeAppleMusic, getMusicKit, signOutAppleMusic } from './apple/musicKit'
 import { createAppleAdapter, createSpotifyAdapter } from './platform/adapter'
 import RoomChooser from './RoomChooser'
 import RoomView from './RoomView'
@@ -28,6 +29,15 @@ function isPlatform(value: string | null): value is Platform {
   return value === 'spotify' || value === 'apple'
 }
 
+// Desktop already defaults to in-tab playback via the Web Playback SDK — no
+// external app needed there at all, so auto-launching the desktop Spotify
+// app right after login would be an unwanted popup, not a convenience. Only
+// mobile genuinely needs "open Spotify somewhere" (Spotify blocks the SDK on
+// every mobile browser), so that's the only case this applies to.
+function isLikelyMobile(): boolean {
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+}
+
 function App() {
   const [platform, setPlatformState] = useState<Platform | null>(() => {
     const stored = localStorage.getItem(LAST_PLATFORM_KEY)
@@ -39,10 +49,15 @@ function App() {
   }, [])
   const [roomId, setRoomId] = useState<string | null>(null)
   const [joinCode, setJoinCode] = useState('')
-  const [pendingRoomFromUrl] = useState(() => new URLSearchParams(window.location.search).get('room'))
+  const [pendingRoomFromUrl, setPendingRoomFromUrl] = useState(() => new URLSearchParams(window.location.search).get('room'))
   // Fallback rejoin target when there's no share-link room in the URL — the
-  // room this same browser last had open.
-  const [pendingRoomFromStorage] = useState(() => (pendingRoomFromUrl ? null : localStorage.getItem(LAST_ROOM_KEY)))
+  // room this same browser last had open. Both of these are proper state
+  // (not just lazy-initialized once) so leaving a room can actually clear
+  // them — otherwise the "Room join" effect below would just silently
+  // rejoin the same room right back the moment the user logs in again.
+  const [pendingRoomFromStorage, setPendingRoomFromStorage] = useState(() =>
+    pendingRoomFromUrl ? null : localStorage.getItem(LAST_ROOM_KEY),
+  )
   const rejoinTarget = pendingRoomFromUrl ?? pendingRoomFromStorage
 
   useEffect(() => {
@@ -100,6 +115,26 @@ function App() {
       const list = await getDevices(accessToken)
       setSpotifyAuthError(null)
       setDevices(list)
+      // A real click carries the user gesture browsers require to create the
+      // Web Playback SDK's DRM/EME session — retry it here in case the
+      // earlier automatic attempt (on page load, no gesture available on a
+      // silent auto-rejoin) failed. connectWebPlaybackDevice() no-ops if
+      // already connected, and no longer caches a failure forever, so this
+      // is a cheap, safe call to make on every refresh. Skipped entirely on
+      // mobile — Spotify documents the Web Playback SDK as desktop-only, but
+      // in practice it doesn't always fail cleanly there: it can still
+      // register a device_id that then errors when actually used, rather
+      // than rejecting up front the way non-Premium accounts do. Not worth
+      // the risk of offering a device that looks selectable but isn't.
+      if (!webPlaybackDeviceIdRef.current && !isLikelyMobile()) {
+        connectWebPlaybackDevice(getSpotifyAccessToken)
+          .then((id) => {
+            setWebPlaybackDeviceId(id)
+            if (!userPickedDeviceRef.current) setDeviceId(id)
+            setWebPlaybackError(null)
+          })
+          .catch((err: Error) => setWebPlaybackError(err.message))
+      }
       if (userPickedDeviceRef.current) return
       // Prefer this tab's own Web Playback SDK device over any external one:
       // it needs no pre-existing Spotify session anywhere else, which is the
@@ -127,6 +162,15 @@ function App() {
           setSpotifyToken(exchanged)
           const pending = consumePendingRoom()
           if (pending) setRoomId(pending)
+          // `exchanged` is only truthy right here — the moment a fresh OAuth
+          // redirect just completed, not a token restored from a previous
+          // visit. Chaining this into the same motion as finishing login is
+          // what makes "log in" and "open the app" feel like one action
+          // instead of two separate steps the user has to notice and click
+          // in sequence. Navigating to an unregistered custom scheme like
+          // this is a safe no-op if Spotify isn't installed — nothing
+          // visibly happens, the page just stays put.
+          if (isLikelyMobile()) window.location.href = 'spotify:'
           return
         }
         const stored = getStoredToken()
@@ -149,10 +193,12 @@ function App() {
   // device instead, based on a since-corrected diagnosis that blamed the SDK
   // itself for what was actually a missing OAuth scope — the SDK is reliable
   // now that that's fixed.) Soft-fails otherwise: if it doesn't work (e.g.
-  // non-Premium account, or any mobile browser — Spotify restricts the SDK
-  // to desktop), external-device selection still works exactly as before.
+  // non-Premium account), external-device selection still works exactly as
+  // before. Skipped outright on mobile — see the matching guard in
+  // refreshDevices for why: it doesn't reliably fail there, it can register
+  // a device that then errors when actually used.
   useEffect(() => {
-    if (platform !== 'spotify' || !spotifyToken) return
+    if (platform !== 'spotify' || !spotifyToken || isLikelyMobile()) return
     connectWebPlaybackDevice(getSpotifyAccessToken)
       .then((id) => {
         setWebPlaybackDeviceId(id)
@@ -230,6 +276,43 @@ function App() {
     if (platform === 'apple' && musicKitInstance) setRoomId(rejoinTarget)
   }, [platform, spotifyToken, deviceId, musicKitInstance, roomId, rejoinTarget])
 
+  // Stays logged in / on the same platform, just leaves the current room and
+  // clears every place a "come back to this room" target could be
+  // reconstructed from, so the "Room join" effect above doesn't just silently
+  // rejoin it the moment this client reconnects — and the address bar itself,
+  // since a share-link URL's ?room= would otherwise keep pointing at it too.
+  const handleLeaveRoom = useCallback(() => {
+    setRoomId(null)
+    localStorage.removeItem(LAST_ROOM_KEY)
+    setPendingRoomFromStorage(null)
+    setPendingRoomFromUrl(null)
+    if (window.location.search) window.history.replaceState({}, '', window.location.pathname)
+  }, [])
+
+  // Full reset: signs out of whichever platform was active and returns to
+  // the very first platform-choice screen. This is the only way out of a
+  // platform that auto-restored from a previous visit (see LAST_PLATFORM_KEY
+  // above) if that's not the one you meant to use this time.
+  const handleSwitchPlatform = useCallback(() => {
+    if (platform === 'spotify') logoutSpotify()
+    if (platform === 'apple') void signOutAppleMusic().catch(() => undefined)
+    localStorage.removeItem(LAST_PLATFORM_KEY)
+    localStorage.removeItem(LAST_ROOM_KEY)
+    setPendingRoomFromStorage(null)
+    setPendingRoomFromUrl(null)
+    if (window.location.search) window.history.replaceState({}, '', window.location.pathname)
+    setRoomId(null)
+    setPlatformState(null)
+    setSpotifyToken(null)
+    setSpotifyAuthError(null)
+    setMusicKitInstance(null)
+    setAppleAuthError(null)
+    setDevices([])
+    setDeviceId('')
+    setWebPlaybackDeviceId(null)
+    userPickedDeviceRef.current = false
+  }, [platform])
+
   const inviteHeading = pendingRoomFromUrl ? "You've been invited to a listening room" : 'Synced listening'
 
   if (!platform) {
@@ -258,6 +341,9 @@ function App() {
           <button type="button" className="primary" onClick={() => void redirectToAuthorize(pendingRoomFromUrl ?? undefined)}>
             {pendingRoomFromUrl ? 'Log in with Spotify to join' : 'Log in with Spotify'}
           </button>
+          <button type="button" onClick={handleSwitchPlatform} style={{ opacity: 0.6 }}>
+            Use Apple Music instead
+          </button>
         </section>
       )
     }
@@ -268,8 +354,10 @@ function App() {
           <h1>Pick a playback device</h1>
           <p style={{ opacity: 0.75, maxWidth: 420, textAlign: 'center' }}>
             This browser tab will be used automatically once it's ready — no separate Spotify session needed.
-            On mobile, Spotify doesn't allow that, so tap below instead: just opening the app is enough, it
-            shows up here on its own as soon as you switch back — no need to play anything first.
+            On mobile, Spotify doesn't allow that, so tap below instead: once there, tap play on anything —
+            Spotify only shows up as an available device once it's actually started playing something (opening
+            the app alone isn't enough). Feel free to pause right away — it'll show up here on its own as soon
+            as you switch back.
           </p>
           <a className="button-link" href="spotify:" target="_blank" rel="noreferrer">
             Open Spotify app
@@ -287,7 +375,14 @@ function App() {
           >
             <option value="">— select device —</option>
             {webPlaybackDeviceId && !devices.some((d) => d.id === webPlaybackDeviceId) && (
-              <option value={webPlaybackDeviceId}>This browser tab</option>
+              // Belt-and-suspenders: the effects above no longer even attempt
+              // this on mobile, so webPlaybackDeviceId shouldn't get set
+              // there at all — disabling it here too in case it somehow does
+              // (e.g. state left over from switching platforms) rather than
+              // trusting that alone, since selecting it on mobile errors.
+              <option value={webPlaybackDeviceId} disabled={isLikelyMobile()}>
+                This browser tab{isLikelyMobile() ? ' (unavailable on mobile)' : ''}
+              </option>
             )}
             {devices.map((d) => (
               <option key={d.id} value={d.id}>
@@ -298,8 +393,8 @@ function App() {
           </select>
           {devices.length === 0 && !webPlaybackDeviceId && !spotifyAuthError && (
             <p style={{ opacity: 0.7 }}>
-              Setting up this tab as a device… if that fails (e.g. no Premium), open Spotify elsewhere — it'll
-              show up here automatically.
+              Setting up this tab as a device… if that fails (e.g. no Premium), open Spotify elsewhere and tap
+              play on anything — it'll show up here automatically once it does.
             </p>
           )}
           {webPlaybackError && (
@@ -308,11 +403,14 @@ function App() {
             </p>
           )}
           <RoomChooser setRoomId={setRoomId} joinCode={joinCode} setJoinCode={setJoinCode} disabled={!deviceId} />
+          <button type="button" onClick={handleSwitchPlatform} style={{ opacity: 0.6 }}>
+            Sign out / switch platform
+          </button>
         </section>
       )
     }
 
-    return <RoomView roomId={roomId} adapter={spotifyAdapter} />
+    return <RoomView roomId={roomId} adapter={spotifyAdapter} onLeaveRoom={handleLeaveRoom} onSwitchPlatform={handleSwitchPlatform} />
   }
 
   // platform === 'apple'
@@ -324,6 +422,9 @@ function App() {
         <button type="button" className="primary" onClick={() => void handleAppleLogin()} disabled={appleAuthorizing}>
           {appleAuthorizing ? 'Opening Apple Music sign-in…' : 'Log in with Apple Music'}
         </button>
+        <button type="button" onClick={handleSwitchPlatform} style={{ opacity: 0.6 }}>
+          Use Spotify instead
+        </button>
       </section>
     )
   }
@@ -333,11 +434,14 @@ function App() {
       <section id="center">
         <h1>Synced listening</h1>
         <RoomChooser setRoomId={setRoomId} joinCode={joinCode} setJoinCode={setJoinCode} />
+        <button type="button" onClick={handleSwitchPlatform} style={{ opacity: 0.6 }}>
+          Sign out / switch platform
+        </button>
       </section>
     )
   }
 
-  return <RoomView roomId={roomId} adapter={appleAdapter!} />
+  return <RoomView roomId={roomId} adapter={appleAdapter!} onLeaveRoom={handleLeaveRoom} onSwitchPlatform={handleSwitchPlatform} />
 }
 
 export default App

@@ -70,25 +70,45 @@ let diagnosticsSubscribed = false
 export function connectWebPlaybackDevice(getAccessToken: () => Promise<string>): Promise<string> {
   if (!connectPromise) {
     connectPromise = (async () => {
-      await loadSdkScript()
-      const player = new Spotify.Player({
-        name: 'Synced Listening (this tab)',
-        getOAuthToken: (callback) => {
-          void getAccessToken().then(callback)
-        },
-        volume: 0.5,
-      })
-      cachedPlayer = player
+      try {
+        await loadSdkScript()
+        const player = new Spotify.Player({
+          name: 'Synced Listening (this tab)',
+          getOAuthToken: (callback) => {
+            void getAccessToken().then(callback)
+          },
+          volume: 0.5,
+        })
+        cachedPlayer = player
 
-      const deviceId = await new Promise<string>((resolve, reject) => {
-        player.addListener('ready', ({ device_id }) => resolve(device_id))
-        player.addListener('initialization_error', ({ message }) => reject(new Error(`Spotify player init error: ${message}`)))
-        player.addListener('authentication_error', ({ message }) => reject(new Error(`Spotify auth error: ${message}`)))
-        player.addListener('account_error', ({ message }) => reject(new Error(`Spotify account error (Premium required): ${message}`)))
-        void player.connect()
-      })
+        const deviceId = await new Promise<string>((resolve, reject) => {
+          player.addListener('ready', ({ device_id }) => resolve(device_id))
+          player.addListener('initialization_error', ({ message }) => reject(new Error(`Spotify player init error: ${message}`)))
+          player.addListener('authentication_error', ({ message }) => reject(new Error(`Spotify auth error: ${message}`)))
+          player.addListener('account_error', ({ message }) => reject(new Error(`Spotify account error (Premium required): ${message}`)))
+          // `void`-ing this away (as it was before) meant a rejection here —
+          // e.g. "NotAllowedError: The request is not allowed by the user
+          // agent..." — became an unhandled promise rejection instead of
+          // routing through this function's own error handling. That's
+          // exactly what happens on a silent auto-rejoin (see the "last
+          // platform/room" persistence in App.tsx): connect() creates a
+          // DRM/EME session, which browsers only allow with a recent real
+          // user gesture, and a rejoin restores everything automatically
+          // with no click — so it surfaced as a raw, confusing browser-level
+          // popup instead of the app's own "playback unavailable" message.
+          player.connect().catch((err: Error) => reject(new Error(`Spotify player connect() rejected: ${err.message}`)))
+        })
 
-      return deviceId
+        return deviceId
+      } catch (err) {
+        // Don't cache a failure forever — connectPromise being non-null is
+        // what guards against re-creating the Player, but a rejected promise
+        // staying cached here meant even a later retry from a genuine user
+        // gesture (e.g. clicking "Refresh devices") would just replay the
+        // same stale rejection instead of trying again.
+        connectPromise = null
+        throw err
+      }
     })()
   }
   return connectPromise

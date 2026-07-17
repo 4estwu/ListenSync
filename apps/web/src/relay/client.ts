@@ -7,7 +7,8 @@ const MAX_RECONNECT_DELAY_MS = 15_000
 export type ConnectionStatus = 'connected' | 'reconnecting'
 
 export interface RelayConnection {
-  send(event: RelayEvent): void
+  /** Returns false without throwing if the socket isn't open right now (e.g. mid-reconnect) — the event is simply not sent, not queued. */
+  send(event: RelayEvent): boolean
   onMessage(cb: (event: RelayEvent) => void): void
   /**
    * Fires when the underlying socket drops (fires 'reconnecting', a retry is
@@ -49,7 +50,9 @@ export function connectRoom(roomId: string): RelayConnection {
 
   return {
     send(event) {
-      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event))
+      if (socket?.readyState !== WebSocket.OPEN) return false
+      socket.send(JSON.stringify(event))
+      return true
     },
     onMessage(cb) {
       messageHandler = cb
