@@ -4,6 +4,19 @@ import { connectRoom, type RelayConnection } from '../relay/client'
 import { AdapterDeviceError, type AdapterPlaybackState, type PlaybackAdapter } from '../platform/adapter'
 import { resolveTrackUri } from './resolveTrack'
 
+// crypto.randomUUID() requires a secure context (HTTPS or localhost/127.0.0.1)
+// and is simply undefined otherwise — e.g. loading this app from a LAN IP over
+// plain HTTP (as the mobile app's Custom Tab flow does). crypto.getRandomValues()
+// has no such restriction, so fall back to building a v4 UUID from it.
+function randomUUID(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
 const SLOW_POLL_MS = 3000 // steady-state mid-track — drift accumulates slowly, no need to check often
 const FAST_POLL_MS = 500 // near a track boundary — auto-advance timing and start-up need more precision
 const BOUNDARY_WINDOW_MS = 5000 // within this many ms of a track's start or end counts as "near a boundary"
@@ -386,7 +399,7 @@ export function useRoomSync({ roomId, adapter, onLog }: UseRoomSyncArgs): RoomSy
   // only (it's who's currently doing periodic position reporting internally),
   // it does NOT gate any of these actions.
   const addToQueue = useCallback((track: Track, addedBy: string) => {
-    const item: QueueItem = { id: crypto.randomUUID(), track, addedBy }
+    const item: QueueItem = { id: randomUUID(), track, addedBy }
     connRef.current?.send({ type: 'queue:add', item })
   }, [])
 
