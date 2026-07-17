@@ -19,3 +19,7 @@ apps/mobile/android/
 *.p12
 *.key
 *.mobileprovision
+
+# mkcert-generated local dev TLS cert/key (apps/web needs HTTPS locally so
+# MusicKit JS can use Encrypted Media Extensions — see vite.config.ts)
+apps/web/.certs/

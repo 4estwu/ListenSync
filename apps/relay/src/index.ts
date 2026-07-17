@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { createServer } from "node:http";
+import { existsSync, readFileSync } from "node:fs";
+import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import path from "node:path";
 import { config } from "dotenv";
 import { WebSocketServer, WebSocket } from "ws";
@@ -55,7 +57,35 @@ function readBody(req: import("node:http").IncomingMessage): Promise<string> {
   });
 }
 
-const httpServer = createServer((req, res) => {
+// Shares apps/web's mkcert-generated dev cert (see vite.config.ts's comment)
+// so the *browser* page (loaded in the mobile app's Apple Music Custom Tab)
+// can reach this relay over wss:// without mixed-content blocking, once that
+// page itself is HTTPS for MusicKit JS's Encrypted Media Extensions
+// requirement. Production (Render) terminates TLS itself and never has these
+// files, so this always falls back to plain HTTP there with no config
+// needed.
+//
+// This TLS listener is deliberately a SEPARATE port from the plain one below
+// (not a replacement) — the native mobile app's own networking (the Spotify
+// SDK's token-swap POST, and the native RoomViewScreen's direct WebSocket
+// connection for Spotify-path room sync — see spotify/auth.ts and
+// relay/client.ts in apps/mobile) goes through Android's own OkHttp/Java
+// stack, not a browser page, so it has no mixed-content concept and gains
+// nothing from TLS locally. Worse, it actively breaks: Android's default
+// Network Security Config trusts only *system* CAs for app traffic, not a
+// CA installed via Settings' "Install a certificate" flow (that only
+// extends trust for Chrome and other apps that opt in) — pointing the
+// native app at this self-signed mkcert cert throws
+// `CertPathValidatorException: Trust anchor for certification path not
+// found` before login can even complete. So: apps/mobile's own .env keeps
+// EXPO_PUBLIC_RELAY_URL on the plain port, while apps/web's (loaded only
+// inside a real browser) points VITE_RELAY_URL at this TLS one.
+const certPath = path.resolve(process.cwd(), "../web/.certs/dev-cert.pem");
+const keyPath = path.resolve(process.cwd(), "../web/.certs/dev-key.pem");
+const devTls = existsSync(certPath) && existsSync(keyPath) ? { cert: readFileSync(certPath), key: readFileSync(keyPath) } : null;
+const TLS_PORT = Number(process.env.TLS_PORT ?? PORT + 1);
+
+const requestHandler = (req: IncomingMessage, res: ServerResponse) => {
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("ok");
@@ -101,11 +131,15 @@ const httpServer = createServer((req, res) => {
   }
   res.writeHead(404);
   res.end();
-});
+};
+
+const httpServer = createHttpServer(requestHandler);
+const httpsServer = devTls ? createHttpsServer(devTls, requestHandler) : null;
 
 const wss = new WebSocketServer({ server: httpServer });
+const wssTls = httpsServer ? new WebSocketServer({ server: httpsServer }) : null;
 
-wss.on("connection", (socket, request) => {
+function handleConnection(socket: WebSocket, request: import("node:http").IncomingMessage): void {
   const roomId = new URL(request.url ?? "", "http://localhost").searchParams.get("room");
   if (!roomId) {
     socket.close(4000, "room query param is required");
@@ -201,8 +235,16 @@ wss.on("connection", (socket, request) => {
       room!.emptyTimeout = setTimeout(() => rooms.delete(roomId), ROOM_GRACE_PERIOD_MS);
     }
   });
-});
+}
+
+wss.on("connection", handleConnection);
+wssTls?.on("connection", handleConnection);
 
 httpServer.listen(PORT, () => {
-  console.log(`relay listening on ws://127.0.0.1:${PORT} (and http://127.0.0.1:${PORT}/apple-developer-token)`);
+  console.log(`relay listening on ws/http://127.0.0.1:${PORT}`);
 });
+if (httpsServer) {
+  httpsServer.listen(TLS_PORT, () => {
+    console.log(`relay also listening on wss/https://127.0.0.1:${TLS_PORT} (dev TLS, for browser clients only)`);
+  });
+}
