@@ -48,16 +48,14 @@ function toSharedTrack(adapter: PlaybackAdapter, result: AdapterTrackResult): Tr
 
 /**
  * Mobile port of apps/web/src/RoomView.tsx, reached only via the native
- * Spotify path (Apple Music instead goes through AppleMusicWebViewScreen,
- * which never routes here). UI-only differences from the web version are
- * React Native's component set (View/Text/TouchableOpacity instead of
+ * Spotify path (Apple Music instead goes through AppleMusicScreen, which
+ * never routes here). UI-only differences from the web version are React
+ * Native's component set (View/Text/TouchableOpacity instead of
  * div/span/button) and the progress bar's seek gesture (onLayout +
  * locationX instead of a click handler + getBoundingClientRect). The actual
- * sync logic underneath (useRoomSync) is the same ported hook — this screen
- * will behave identically to the web room view once the adapter in
- * platform/spotifyAdapter.ts is wired to real native SDK calls; right now
- * every action will surface the adapter's "not yet implemented" errors in
- * the log below, which is expected.
+ * sync logic underneath (useRoomSync) is the same ported hook, and
+ * platform/spotifyAdapter.ts is real (REST-based, ported from apps/web,
+ * unit-tested) — not a stub.
  */
 export function RoomViewScreen() {
   const { roomId, adapter } = useSession()

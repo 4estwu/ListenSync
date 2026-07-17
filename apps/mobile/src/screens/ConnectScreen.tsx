@@ -9,8 +9,8 @@ import { styles } from './styles'
 type Props = NativeStackScreenProps<RootStackParamList, 'Connect'>
 
 /**
- * Spotify-only now — Apple Music is handled by AppleMusicWebViewScreen
- * instead, which never routes through here.
+ * Spotify-only now — Apple Music is handled by AppleMusicScreen instead,
+ * which never routes through here.
  *
  * UNVERIFIED: authenticate()'s native SSO handshake (spotify/auth.ts) has not
  * been exercised on a device. Everything else here — device listing/

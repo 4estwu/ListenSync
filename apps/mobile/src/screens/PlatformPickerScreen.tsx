@@ -12,9 +12,9 @@ export function PlatformPickerScreen({ navigation }: Props) {
   const choose = (platform: 'spotify' | 'apple') => {
     setPlatform(platform)
     // Apple Music skips the native Connect/RoomChooser/Room stack entirely —
-    // it's handled inside a WebView embedding the deployed web app instead
-    // (see AppleMusicWebViewScreen.tsx for why).
-    navigation.navigate(platform === 'apple' ? 'AppleWebView' : 'Connect')
+    // it launches the deployed web app in a Chrome Custom Tab instead (see
+    // AppleMusicScreen.tsx for why).
+    navigation.navigate(platform === 'apple' ? 'AppleMusic' : 'Connect')
   }
 
   return (

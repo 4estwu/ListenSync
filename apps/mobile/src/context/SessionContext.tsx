@@ -10,8 +10,8 @@ import { getDevices, type SpotifyDevice } from '../spotify/player'
 // React Navigation screens can each read/update it without prop-drilling
 // through route params.
 //
-// Apple Music has no entry here: it's handled entirely by embedding the
-// already-working web app in a WebView (see AppleMusicWebViewScreen.tsx),
+// Apple Music has no entry here: it's handled entirely by launching the
+// already-working web app in a Chrome Custom Tab (see AppleMusicScreen.tsx),
 // which owns its own auth and sync state internally. `adapter` is therefore
 // only ever populated for the native Spotify path.
 //
