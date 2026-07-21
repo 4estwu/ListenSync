@@ -1,16 +1,16 @@
 import * as SecureStore from 'expo-secure-store'
-import { Authenticate, isAvailable } from '@wwdrew/expo-spotify-sdk'
+import { Auth } from '@wwdrew/expo-spotify-sdk'
 
 // Real auth, via @wwdrew/expo-spotify-sdk's native Spotify SSO handshake
 // (config plugin in app.config.js supplies clientID/scheme/host at build
-// time — authenticateAsync() itself takes no redirect URI, unlike the web
+// time — Auth.authenticate() itself takes no redirect URI, unlike the web
 // app's PKCE flow). Session storage uses expo-secure-store (Keychain/
 // Keystore-backed), not AsyncStorage — this holds an access token, worth the
 // extra step over plain unencrypted storage.
 //
-// CONFIRMED on a real device (2026-07-17): calling authenticateAsync()
-// without a tokenSwapURL fails after 2FA with "response type must be code".
-// Root cause, found by reading the library's own Android source
+// CONFIRMED on a real device (2026-07-17): calling authenticate() without a
+// tokenSwapURL fails after 2FA with "response type must be code". Root
+// cause, found by reading the library's own Android source
 // (ExpoSpotifySDKModule.kt): it only requests response_type=code when
 // tokenSwapURL/tokenRefreshURL is set; otherwise it requests
 // response_type=token (implicit grant), which Spotify's authorization
@@ -21,11 +21,21 @@ import { Authenticate, isAvailable } from '@wwdrew/expo-spotify-sdk'
 // the library's Kotlin source sends: a bare `code` param, expecting
 // Spotify's raw token JSON straight back.
 //
-// tokenRefreshURL is deliberately NOT passed here — the same Kotlin source
-// only implements the tokenSwapURL call; there is no refresh-token HTTP
-// call anywhere in the Android module, so passing tokenRefreshURL would
-// silently do nothing on this platform. See ensureFreshToken below for the
-// current refresh story.
+// tokenRefreshURL is deliberately NOT passed here — see ensureFreshToken
+// below for the current refresh story (unchanged by the v1 upgrade: v1's
+// own README confirms Android still has no refresh HTTP call implemented,
+// only the code-swap).
+//
+// Upgraded from v0.5.0 (auth-only) to v1.0.0 (2026-07-20) specifically for
+// App Remote support — see platform/spotifyAdapter.ts and
+// spotify/appRemotePlayer.ts. This is the "Expo SDK 55 lane" per the
+// library's own versioning scheme, but that floor turned out to be an
+// iOS-only CocoaPods podspec constraint (`s.platform :ios, '15.1'`); the
+// Android build has no equivalent version gate, and this project's mobile
+// work is Android-only so far (iOS unattempted — no Developer Program
+// enrollment or device). Confirmed by reading the package's own
+// android/build.gradle and package.json (empty "dependencies", wildcard
+// peerDependencies) before committing to the upgrade.
 const TOKEN_KEY = 'spotify_token'
 
 // process.env, not EXPO_PUBLIC_RELAY_URL's own ws(s):// scheme — the relay
@@ -34,15 +44,17 @@ const TOKEN_KEY = 'spotify_token'
 // swapped.
 const TOKEN_SWAP_URL = (process.env.EXPO_PUBLIC_RELAY_URL ?? 'ws://127.0.0.1:8787').replace(/^ws/, 'http') + '/spotify/token-swap'
 
-// user-read-playback-state / user-modify-playback-state / user-read-currently-playing:
-// read/control an existing external Spotify Connect device — this app
-// registers no device of its own (no native equivalent of the web app's
-// in-tab Web Playback SDK), so an external device (e.g. the phone's own
-// separately-installed Spotify app) must already be active. `streaming` is
-// kept for parity with apps/web's scope list even though this app doesn't
-// run the Web Playback SDK — harmless to request, and cheap insurance if a
-// future revision adds an in-app player.
+// app-remote-control: required for AppRemote.connect() — without it, the
+// Spotify app rejects the App Remote IPC handshake outright regardless of
+// what the other granted scopes allow. user-read-playback-state /
+// user-modify-playback-state / user-read-currently-playing are no longer
+// load-bearing for playback itself (App Remote replaces the Web API REST
+// calls those gated — see spotify/appRemotePlayer.ts) but are kept since
+// search still hits the Web API directly (spotify/player.ts) and the
+// account-tier check in ConnectScreen.tsx reads GET /v1/me. `streaming` is
+// kept for parity with apps/web's scope list.
 const SCOPES = [
+  'app-remote-control',
   'user-read-playback-state',
   'user-modify-playback-state',
   'user-read-currently-playing',
@@ -58,7 +70,7 @@ export interface SpotifyToken {
 }
 
 export function isSpotifyAppAvailable(): boolean {
-  return isAvailable()
+  return Auth.isAvailable()
 }
 
 async function storeToken(token: SpotifyToken): Promise<void> {
@@ -80,7 +92,7 @@ export async function logout(): Promise<void> {
  * persists the resulting session.
  */
 export async function authenticate(): Promise<SpotifyToken> {
-  const session = await Authenticate.authenticateAsync({ scopes: [...SCOPES], tokenSwapURL: TOKEN_SWAP_URL })
+  const session = await Auth.authenticate({ scopes: [...SCOPES], tokenSwapURL: TOKEN_SWAP_URL })
   const token: SpotifyToken = {
     accessToken: session.accessToken,
     refreshToken: session.refreshToken,

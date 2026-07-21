@@ -1,9 +1,10 @@
 # apps/mobile — ListenSync v2 (iOS + Android)
 
-Status: **Android verified end-to-end on a real emulator (2026-07-17); iOS
-unattempted.** See [`/MOBILE_V2_PLAN.md`](../../MOBILE_V2_PLAN.md) at the
-repo root for the full architecture writeup, platform support matrix, and
-open questions — read that first.
+Status: **Android verified end-to-end on a real emulator, including real
+Spotify App Remote playback (2026-07-20); iOS unattempted.** See
+[`/MOBILE_V2_PLAN.md`](../../MOBILE_V2_PLAN.md) at the repo root for the
+full architecture writeup, platform support matrix, and open questions —
+read that first.
 
 This is on the `mobile-v2` branch, not `master`/`main` — nothing here affects
 the deployed web app or relay.
@@ -13,42 +14,51 @@ the deployed web app or relay.
 - **Real, working, and unit-tested**: `src/relay/client.ts` (WebSocket
   connection to the same relay `apps/web` uses), `src/sync/useRoomSync.ts`
   and `src/sync/resolveTrack.ts` (ported from `apps/web`, same sync/drift-
-  correction logic), `src/spotify/player.ts` and
-  `src/platform/spotifyAdapter.ts` (verbatim ports of apps/web's Spotify Web
-  API REST logic — rate-limit backoff, device-transfer skip logic — **not**
-  App Remote, see the correction note below), all the screens/navigation,
-  and `src/screens/AppleMusicScreen.tsx` (launches the deployed web app in a
-  Chrome Custom Tab — see "Apple Music: Custom Tabs, not a WebView" below).
-- **Real, and now verified on a real Android emulator (2026-07-17)**:
-  `src/spotify/auth.ts`'s `authenticate()` — the native Spotify SSO
-  handshake via `@wwdrew/expo-spotify-sdk` was exercised live and hit a
-  real bug (see below, now fixed). The Apple Music Custom Tab flow was also
-  exercised live, reaching Apple's real sign-in and consent screens.
+  correction logic), `src/spotify/appRemotePlayer.ts` and
+  `src/platform/spotifyAdapter.ts` (playback control via Spotify's **App
+  Remote SDK** — see the correction note below; `src/spotify/player.ts`
+  still does plain Web API REST, but only for catalog search now), all the
+  screens/navigation, and `src/screens/AppleMusicScreen.tsx` (launches the
+  deployed web app in a Chrome Custom Tab — see "Apple Music: Custom Tabs,
+  not a WebView" below).
+- **Real, and verified live on a real Android emulator (2026-07-20)**:
+  `src/spotify/auth.ts`'s `authenticate()` (native SSO handshake) →
+  `AppRemote.connect()` → search → queue → play, all working end to end
+  with the playback position genuinely advancing — no external Spotify
+  Connect device, no separately opening Spotify and pressing play first.
+  The Apple Music Custom Tab flow was also exercised live, reaching Apple's
+  real sign-in and consent screens.
 - **Still unverified**: the whole iOS side — no Apple Developer Program
   enrollment or physical iPhone used yet (Windows can't run an iOS
   Simulator at all, so a physical device is mandatory there regardless).
 
-**Correction (2026-07-04)**: `@wwdrew/expo-spotify-sdk` — confirmed by
-reading its shipped `.d.ts` files — only wraps Spotify's native auth
-handshake (`isAvailable()` / `Authenticate.authenticateAsync()`); it does
-**not** expose Spotify's App Remote SDK for playback control, despite the
-original plan assuming it did. So `platform/spotifyAdapter.ts` uses the same
-Spotify Web API REST calls `apps/web` already uses (a verbatim port), which
-needs an already-active **external** Spotify Connect device — same
-constraint a mobile *browser* user of the web app already has. See
-`/MOBILE_V2_PLAN.md`'s "Why this exists" section for the full correction and
-what this means for the original rationale to go native for Spotify at all.
+**Correction (2026-07-04), superseded 2026-07-20**: `@wwdrew/expo-spotify-sdk`
+was auth-only at the time this was written (confirmed by reading its
+shipped `.d.ts` files). It has since shipped real App Remote support in its
+`1.0.0` release — see `/MOBILE_V2_PLAN.md`'s "Why this exists" section for
+the full history, including three real AGP/upstream build bugs hit and
+fixed while upgrading, and why the library's "Expo SDK 55 lane" framing
+didn't block using it on this project's SDK 52 setup for Android. Playback
+no longer needs an external Spotify Connect device — App Remote controls
+the Spotify app running on the same device directly. `platform/
+spotifyAdapter.ts` still uses plain Web API REST for one thing: catalog
+search, which App Remote doesn't expose.
 
-**Real bug found and fixed (2026-07-17)**: `@wwdrew/expo-spotify-sdk`
+**Real bugs found and fixed (2026-07-17, 2026-07-20)**: `@wwdrew/expo-spotify-sdk`
 requests `response_type=token` (implicit grant) unless a `tokenSwapURL` is
 configured — and Spotify's authorization server now rejects that flow
 outright (deprecated server-side), surfacing as "response type must be
 code" right after 2FA. `spotify/auth.ts` now passes `tokenSwapURL` pointing
-at a new relay endpoint (`apps/relay/src/spotifyTokenSwap.ts`) that
-exchanges the code server-side using `SPOTIFY_CLIENT_SECRET`. Token
-*refresh* is still not implemented — the same library has no refresh HTTP
-call wired up on Android at all — so an expired session still requires
-logging in again.
+at a relay endpoint (`apps/relay/src/spotifyTokenSwap.ts`) that exchanges
+the code server-side using `SPOTIFY_CLIENT_SECRET`. Token *refresh* is
+still not implemented — the same library has no refresh HTTP call wired up
+on Android at all — so an expired session still requires logging in again.
+Separately: installing the actual Spotify app on the test device switches
+the SDK to app-to-app auth, which needs the debug keystore's SHA-1
+fingerprint registered in the Spotify Developer Dashboard's "Android
+Packages" section (a different section from Redirect URIs) — without it,
+login fails hard with `AUTHENTICATION_SERVICE_UNAVAILABLE` instead of
+falling back to the browser flow.
 
 ## Apple Music: Custom Tabs, not a WebView
 
@@ -80,9 +90,9 @@ npx expo prebuild     # generates native ios/ and android/ projects
 npx eas login          # needed for cloud builds — see below
 ```
 
-This app uses a native module (`@wwdrew/expo-spotify-sdk`, for auth only —
-see the correction above), so **Expo Go won't work** — it can't load
-arbitrary native code. You need a **development build** instead:
+This app uses a native module (`@wwdrew/expo-spotify-sdk`, for auth + App
+Remote — see the correction above), so **Expo Go won't work** — it can't
+load arbitrary native code. You need a **development build** instead:
 
 ```
 eas build --profile development --platform ios
@@ -103,12 +113,15 @@ Android as of 2026-07-17 — the local build is much faster for iterating
 
 ## Testing reality check
 
-Verified end-to-end on a real Android emulator (2026-07-17): the app
+Verified end-to-end on a real Android emulator (2026-07-20): the app
 installs, launches, the platform picker renders, Spotify's native login
-flow runs for real (found and fixed a real bug — see above), and the Apple
-Music Custom Tab flow reaches Apple's genuine sign-in/consent screens. iOS
-is entirely unverified — needs the Apple Developer Program enrollment and a
-physical iPhone (Windows can't run an iOS Simulator at all).
+flow runs for real, `AppRemote.connect()` succeeds, and search → queue →
+play genuinely plays audio through the Spotify app on the same device
+(position confirmed advancing across a real wait, not a static display) —
+no external Spotify Connect device needed. The Apple Music Custom Tab flow
+reaches Apple's genuine sign-in/consent screens. iOS is entirely
+unverified — needs the Apple Developer Program enrollment and a physical
+iPhone (Windows can't run an iOS Simulator at all).
 
 ## Unit tests
 
@@ -119,9 +132,9 @@ behavior against a throwaway `ws` server, not mocks), `sync/useRoomSync.test.ts`
 (a smaller subset of the web app's regression suite: event-driven
 reconciliation, correction cooldown, poll-loop resilience to adapter
 failures, device-error surfacing, seek/queue actions), and
-`platform/spotifyAdapter.test.ts` (a smaller subset of the web app's
-adapter tests: state mapping, rate-limit backoff, device-transfer skip
-logic, search result mapping, queue mirroring).
+`platform/spotifyAdapter.test.ts` (App Remote-backed adapter: state
+mapping, play/pause/seek delegation, search result mapping, best-effort
+queue mirroring).
 Hook tests use `react-test-renderer`, not `@testing-library/react` +
 `react-dom` — mixing react-dom@19 (hoisted to the repo root from `apps/web`)
 with this workspace's pinned react@18.3.1 (react-native's peer requirement)

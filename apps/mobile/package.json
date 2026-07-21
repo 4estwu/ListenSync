@@ -8,13 +8,14 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "postinstall": "patch-package --patch-dir patches && node scripts/fetch-app-remote-aar.js"
   },
   "dependencies": {
-    "@spotifyapple/shared": "*",
     "@react-navigation/native": "^7.0.0",
     "@react-navigation/native-stack": "^7.0.0",
-    "@wwdrew/expo-spotify-sdk": "^0.5.0",
+    "@spotifyapple/shared": "*",
+    "@wwdrew/expo-spotify-sdk": "^1.0.0",
     "expo": "~52.0.0",
     "expo-crypto": "~14.0.0",
     "expo-dev-client": "~5.0.0",
@@ -31,6 +32,7 @@
     "@types/react-test-renderer": "~18.3.0",
     "@types/ws": "^8.5.12",
     "babel-preset-expo": "~12.0.0",
+    "patch-package": "^8.0.1",
     "react-test-renderer": "18.3.1",
     "typescript": "^5.6.3",
     "vitest": "^4.1.9",

@@ -45,6 +45,74 @@ Everything else in this plan (repo strategy, Apple Music WebView pivot) is
 still sound; only the specific "App Remote escapes the browser restriction"
 claim was wrong.
 
+**Second correction (2026-07-20) — App Remote is real now.** Option 3 above
+("a real App Remote binding is still possible... not done here") got done.
+`@wwdrew/expo-spotify-sdk` shipped real App Remote support in its `1.0.0`
+release, published just 13 days before this was checked — the "auth only"
+finding above was accurate when written, not anymore. Upgraded
+`apps/mobile`'s dependency from `^0.5.0` to `^1.0.0`, rewrote
+`spotify/auth.ts` (namespaced `Auth.*` API), added
+`spotify/appRemotePlayer.ts` (wraps `AppRemote`/`Player`), rewrote
+`platform/spotifyAdapter.ts` to route play/pause/seek/getState/queue through
+it instead of Web API REST (search stays on REST — App Remote has no
+arbitrary catalog search), and removed `ConnectScreen.tsx`'s whole
+device-picker step entirely, since App Remote controls the Spotify app
+running on the *same device* directly over IPC — there's no external-device
+concept to pick from anymore. Verified live on a real Android emulator:
+login → App Remote connect → search → queue → play, with the position
+genuinely advancing (0:41 → 1:14 across a real wait, not a static display) —
+no external Connect device, no separately opening Spotify and pressing
+play first.
+
+The library's own versioning docs frame `1.x` as the "Expo SDK 55 lane"
+(this project is on SDK 52) — investigated before committing to the
+upgrade, and confirmed that floor is entirely an iOS CocoaPods podspec
+constraint (`s.platform :ios, '15.1'`); the Android build has no
+equivalent version gate, the package ships zero runtime npm dependencies of
+its own (empty `"dependencies"`, wildcard peer deps), and this project's
+mobile work is Android-only so far anyway (iOS still unattempted). Confirmed
+by reading the package's actual `android/build.gradle` and `package.json`
+before upgrading, not by assumption.
+
+Getting a real Android build working surfaced three genuine upstream/AGP
+bugs, all worked around without touching `node_modules` in a way that
+wouldn't survive a reinstall:
+1. The config plugin's `redirectPathPattern` option is documented as
+   optional (defaults to `".*"`) but has no actual effect on Android — the
+   generated manifest placeholder is simply never set. Fixed with a small
+   local Expo config plugin (`withSpotifyRedirectPathPatternFix` in
+   `app.config.js`) that patches the generated `app/build.gradle` directly.
+2. The package's own `android/build.gradle` declares the App Remote AAR via
+   `implementation files('libs/...')`, which modern AGP (8+) rejects outright
+   when building a *library* module's own AAR output ("Direct local .aar
+   file dependencies are not supported when building an AAR"). Fixed via a
+   `patch-package` patch (`apps/mobile/patches/`) switching it to the flatDir
+   module-coordinate form.
+3. That flatDir repository, declared only inside the library's own
+   `build.gradle`, isn't visible when a *different* project (`:app`,
+   resolving its full transitive runtime classpath) tries to resolve it —
+   Gradle multi-project resolution uses the requesting project's own
+   repositories, not each dependency's declaring project's. Fixed with a
+   second local config plugin (`withSpotifyAppRemoteFlatDir`) adding the same
+   flatDir repo to the root `android/build.gradle`'s `allprojects` block.
+
+The App Remote AAR itself (`spotify-app-remote-release-0.8.0.aar`) isn't on
+Maven Central — Spotify only distributes it via GitHub releases, and the
+package expects it manually placed in its own `android/libs/`. Automated via
+`apps/mobile/scripts/fetch-app-remote-aar.js`, wired into this workspace's
+`postinstall` alongside `patch-package`, so a fresh `npm install` sets
+everything up with no manual steps.
+
+One real, permanent limitation this doesn't touch: Spotify's Feb–March 2026
+developer-platform policy change caps **any** non-Extended-Quota app
+(this one, permanently — Extended Quota requires a registered business with
+250k+ MAU) at 5 manually-allowlisted Spotify accounts, enforced at the
+OAuth-authorization step itself, regardless of which SDK is used for
+playback afterward. Confirmed acceptable for this project's actual use
+case: only one Spotify-side listener needs to authenticate through this
+app at all; everyone else is either on Apple Music (no equivalent cap) or
+in the same physical room hearing that one Spotify session.
+
 ## Repo strategy: same repo, new workspace — not a separate repo
 
 Recommendation: **`apps/mobile/`** in this monorepo, not a new repo.
@@ -68,8 +136,8 @@ Recommendation: **`apps/mobile/`** in this monorepo, not a new repo.
 
 | | Spotify | Apple Music |
 |---|---|---|
-| iOS | ✅ Native auth + REST playback (not App Remote — see below) | ✅ Chrome Custom Tab launching the deployed web app (MusicKit JS) |
-| Android | ✅ Same as iOS | ✅ Same Custom Tab approach — identical on both platforms |
+| iOS | ⚠️ Native auth implemented; App Remote unverified (no device tested yet) | ✅ Chrome Custom Tab launching the deployed web app (MusicKit JS) |
+| Android | ✅ Native auth + App Remote (real native playback, no external device — see below) | ✅ Same Custom Tab approach — identical on both platforms |
 
 This table used to have an Android+Apple Music gap requiring a custom native
 module (a "Phase 2," scoped separately, since Apple ships an official
@@ -282,9 +350,9 @@ above.
    library's Android source has no refresh-token HTTP call wired up at all,
    so a relay refresh endpoint would have nothing to call it. An expired
    Spotify session still just requires logging in again.
-8. **No real App Remote binding** — see "Why this exists" above. If
-   App Remote's connect/disconnect lifecycle (vs. this app's REST polling)
-   ever becomes worth having, the options are: write a custom native module
-   bridging Spotify's App Remote SDK directly, or find/fork a library that
-   actually implements it. Not attempted here — REST parity with the web
-   app was the pragmatic choice given no verified alternative exists.
+8. **App Remote binding — done (2026-07-20)**, see "Second correction" above.
+   `@wwdrew/expo-spotify-sdk@1.0.0` added real App Remote support; verified
+   live on Android (login → connect → play, position genuinely advancing, no
+   external device). iOS is unverified — same App Remote code path should
+   apply once there's a physical device to test on, but nothing has actually
+   run there yet.

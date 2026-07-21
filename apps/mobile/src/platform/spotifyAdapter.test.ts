@@ -1,46 +1,47 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import * as appRemote from '../spotify/appRemotePlayer'
 import * as spotifyPlayer from '../spotify/player'
 import { createSpotifyAdapter } from './spotifyAdapter'
 
-// Partial port of apps/web/src/platform/adapter.test.ts's createSpotifyAdapter
-// coverage (this file's logic is a verbatim port of that factory — see
-// spotifyAdapter.ts). Basic coverage of the highest-value behaviors: state
-// mapping, rate-limit backoff, and device-transfer skip logic — not a
-// duplicate of every case already pinned down over there.
+// Rewritten 2026-07-20 for the App Remote adapter (see spotifyAdapter.ts) —
+// playback now goes through spotify/appRemotePlayer.ts instead of REST, so
+// there's no device/rate-limit-backoff logic left in this file to cover
+// (appRemotePlayer.ts's own connection-error mapping is the analogous
+// behavior, not tested here — mocked out entirely below). What's left to
+// cover: getState's null-mapping, that play/pause/seek/enqueueUpcoming
+// delegate to the right appRemotePlayer functions, and search's mapping
+// (unchanged from the REST version).
+
+vi.mock('../spotify/appRemotePlayer', () => ({
+  getState: vi.fn(),
+  play: vi.fn(),
+  pause: vi.fn(),
+  seek: vi.fn(),
+  queue: vi.fn(),
+}))
 
 vi.mock('../spotify/player', async () => {
   const actual = await vi.importActual<typeof import('../spotify/player')>('../spotify/player')
   return {
     ...actual,
-    getPlaybackState: vi.fn(),
-    play: vi.fn(),
-    pause: vi.fn(),
-    seek: vi.fn(),
     searchTracks: vi.fn(),
     searchByIsrc: vi.fn(),
-    addToQueue: vi.fn(),
   }
 })
 
 function makeDeps() {
-  return { getAccessToken: vi.fn().mockResolvedValue('token123'), getDeviceId: vi.fn().mockReturnValue('device1') }
+  return { getAccessToken: vi.fn().mockResolvedValue('token123') }
 }
 
 describe('createSpotifyAdapter getState', () => {
   afterEach(() => vi.clearAllMocks())
 
-  it('maps a live Spotify PlaybackState to AdapterPlaybackState', async () => {
-    vi.mocked(spotifyPlayer.getPlaybackState).mockResolvedValue({
-      is_playing: true,
-      progress_ms: 42_000,
-      device: { id: 'device1', name: 'Test', type: 'Computer', is_active: true },
-      item: {
-        uri: 'spotify:track:abc',
-        name: 'Song',
-        artists: [{ name: 'Artist' }],
-        album: { name: 'Album', images: [] },
-        duration_ms: 200_000,
-      },
+  it('maps a live App Remote state to AdapterPlaybackState', async () => {
+    vi.mocked(appRemote.getState).mockResolvedValue({
+      isPlaying: true,
+      positionMs: 42_000,
+      durationMs: 200_000,
+      platformId: 'spotify:track:abc',
     })
 
     const adapter = createSpotifyAdapter(makeDeps())
@@ -49,8 +50,8 @@ describe('createSpotifyAdapter getState', () => {
     expect(state).toEqual({ isPlaying: true, positionMs: 42_000, durationMs: 200_000, platformId: 'spotify:track:abc' })
   })
 
-  it('maps a 204 (null from getPlaybackState) to an explicit "nothing loaded" object, not null', async () => {
-    vi.mocked(spotifyPlayer.getPlaybackState).mockResolvedValue(null)
+  it('maps null (nothing loaded in Spotify) to an explicit "nothing loaded" object, not null', async () => {
+    vi.mocked(appRemote.getState).mockResolvedValue(null)
 
     const adapter = createSpotifyAdapter(makeDeps())
     const state = await adapter.getState()
@@ -59,56 +60,31 @@ describe('createSpotifyAdapter getState', () => {
   })
 })
 
-describe('createSpotifyAdapter rate-limit backoff', () => {
+describe('createSpotifyAdapter playback delegation', () => {
   afterEach(() => vi.clearAllMocks())
 
-  it('a 429 from any call (not just getState) blocks subsequent calls without hitting the network again', async () => {
-    vi.mocked(spotifyPlayer.play).mockRejectedValueOnce(new spotifyPlayer.SpotifyRateLimitError(60_000))
+  it('play() passes the access-token getter, track URI, and position through to appRemotePlayer', async () => {
+    vi.mocked(appRemote.play).mockResolvedValue(undefined)
+    const deps = makeDeps()
 
-    const adapter = createSpotifyAdapter(makeDeps())
-    await expect(adapter.play('spotify:track:abc', 0)).rejects.toThrow()
+    const adapter = createSpotifyAdapter(deps)
+    await adapter.play('spotify:track:abc', 5000)
 
-    vi.mocked(spotifyPlayer.getPlaybackState).mockResolvedValue(null)
-    await adapter.getState()
-
-    expect(spotifyPlayer.getPlaybackState).not.toHaveBeenCalled()
-  })
-})
-
-describe('createSpotifyAdapter device-active tracking', () => {
-  afterEach(() => vi.clearAllMocks())
-
-  it('play() forces a transfer when the device has never been confirmed active (fresh session)', async () => {
-    vi.mocked(spotifyPlayer.play).mockResolvedValue(undefined)
-
-    const adapter = createSpotifyAdapter(makeDeps())
-    await adapter.play('spotify:track:abc', 0)
-
-    expect(spotifyPlayer.play).toHaveBeenCalledWith('token123', 'device1', 'spotify:track:abc', 0, true)
+    expect(appRemote.play).toHaveBeenCalledWith(deps.getAccessToken, 'spotify:track:abc', 5000)
   })
 
-  it(
-    "play()/seek() skip forcing a transfer once getState() has confirmed this device is already active — " +
-      're-transferring an already-active device can interrupt in-flight playback',
-    async () => {
-      vi.mocked(spotifyPlayer.getPlaybackState).mockResolvedValue({
-        is_playing: true,
-        progress_ms: 1000,
-        device: { id: 'device1', name: 'Test', type: 'Computer', is_active: true },
-        item: { uri: 'spotify:track:abc', name: 'Song', artists: [], album: { name: '', images: [] }, duration_ms: 200_000 },
-      })
-      vi.mocked(spotifyPlayer.play).mockResolvedValue(undefined)
-      vi.mocked(spotifyPlayer.seek).mockResolvedValue(undefined)
+  it('pause() and seek() delegate to appRemotePlayer', async () => {
+    vi.mocked(appRemote.pause).mockResolvedValue(undefined)
+    vi.mocked(appRemote.seek).mockResolvedValue(undefined)
+    const deps = makeDeps()
 
-      const adapter = createSpotifyAdapter(makeDeps())
-      await adapter.getState()
-      await adapter.play(undefined, 5000)
-      await adapter.seek(6000)
+    const adapter = createSpotifyAdapter(deps)
+    await adapter.pause()
+    await adapter.seek(6000)
 
-      expect(spotifyPlayer.play).toHaveBeenCalledWith('token123', 'device1', undefined, 5000, false)
-      expect(spotifyPlayer.seek).toHaveBeenCalledWith('token123', 'device1', 6000, false)
-    },
-  )
+    expect(appRemote.pause).toHaveBeenCalledWith(deps.getAccessToken)
+    expect(appRemote.seek).toHaveBeenCalledWith(deps.getAccessToken, 6000)
+  })
 })
 
 describe('createSpotifyAdapter search', () => {
@@ -138,9 +114,9 @@ describe('createSpotifyAdapter search', () => {
 describe('createSpotifyAdapter enqueueUpcoming', () => {
   afterEach(() => vi.clearAllMocks())
 
-  it('pushes each track to the native queue in order (sequential, not concurrent — Spotify appends in call order)', async () => {
+  it('pushes each track to the queue in order (sequential, not concurrent — App Remote appends in call order)', async () => {
     const calls: string[] = []
-    vi.mocked(spotifyPlayer.addToQueue).mockImplementation(async (_token, _deviceId, uri) => {
+    vi.mocked(appRemote.queue).mockImplementation(async (_getAccessToken, uri) => {
       calls.push(uri)
     })
 
@@ -148,5 +124,18 @@ describe('createSpotifyAdapter enqueueUpcoming', () => {
     await adapter.enqueueUpcoming?.(['spotify:track:1', 'spotify:track:2', 'spotify:track:3'])
 
     expect(calls).toEqual(['spotify:track:1', 'spotify:track:2', 'spotify:track:3'])
+  })
+
+  it('one track failing does not abort the rest', async () => {
+    const calls: string[] = []
+    vi.mocked(appRemote.queue).mockImplementation(async (_getAccessToken, uri) => {
+      if (uri === 'spotify:track:2') throw new Error('boom')
+      calls.push(uri)
+    })
+
+    const adapter = createSpotifyAdapter(makeDeps())
+    await adapter.enqueueUpcoming?.(['spotify:track:1', 'spotify:track:2', 'spotify:track:3'])
+
+    expect(calls).toEqual(['spotify:track:1', 'spotify:track:3'])
   })
 })

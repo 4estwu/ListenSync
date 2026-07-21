@@ -24,6 +24,73 @@
 // .env.example by hand — there's no automatic link between the two.
 require('dotenv').config()
 
+const path = require('node:path')
+const { withAppBuildGradle, withProjectBuildGradle } = require('@expo/config-plugins')
+
+// Works around a real bug in @wwdrew/expo-spotify-sdk@1.0.0's Android config
+// plugin: passing `redirectPathPattern` in the plugin config (below) has no
+// effect — the generated android/app/build.gradle's manifestPlaceholders
+// block never gets a redirectPathPattern entry at all, regardless of what's
+// configured, so the manifest merge fails with "requires a placeholder
+// substitution but no value for <redirectPathPattern> is provided." Confirmed
+// by inspecting the generated build.gradle after prebuild — the key is
+// simply absent. Runs after the wwdrew plugin (Expo applies each plugin's
+// mods in array order — see plugins below) so its manifestPlaceholders
+// block already exists to patch into. Matches both build types (debug and
+// release each get their own manifestPlaceholders block in this file).
+function withSpotifyRedirectPathPatternFix(config) {
+  return withAppBuildGradle(config, (config) => {
+    if (config.modResults.language !== 'groovy') return config
+    const needle = /redirectHostName:\s*"([^"]*)"/g
+    if (!needle.test(config.modResults.contents)) {
+      throw new Error(
+        "withSpotifyRedirectPathPatternFix: couldn't find redirectHostName in app/build.gradle — " +
+          '@wwdrew/expo-spotify-sdk may have changed its generated manifestPlaceholders shape; update this plugin.',
+      )
+    }
+    config.modResults.contents = config.modResults.contents.replace(needle, (match) => `${match},\n          redirectPathPattern: ".*"`)
+    return config
+  })
+}
+
+// Second workaround for the same App Remote AAR problem (see
+// patches/@wwdrew+expo-spotify-sdk+1.0.0.patch, applied via patch-package):
+// that patch switches the wwdrew module's own build.gradle from
+// `implementation files('libs/...')` to the flatDir module-coordinate form
+// (`implementation(name: ..., ext: 'aar')`), which fixes AGP's "Direct
+// local .aar file dependencies are not supported when building an AAR"
+// error — building wwdrew's own library AAR now works. But a flatDir
+// repository declared ONLY inside a leaf subproject's own build.gradle
+// isn't visible when a *different* project (:app, resolving its full
+// runtime classpath transitively through :expo -> :wwdrew-expo-spotify-sdk)
+// resolves that dependency — Gradle multi-project dependency resolution
+// uses the requesting project's own repository chain for transitive deps,
+// not each dependency's declaring project's repos. Confirmed by hitting
+// "Could not find :spotify-app-remote-release-0.8.0:." on
+// :app:debugRuntimeClasspath specifically, immediately after the previous
+// fix made the wwdrew module itself buildable. Fix: add the same flatDir
+// repo to the root build.gradle's `allprojects { repositories { ... } }`
+// block, generated fresh by every `expo prebuild` — so it's visible
+// uniformly, matching how :app's classpath resolution actually reaches it.
+function withSpotifyAppRemoteFlatDir(config) {
+  return withProjectBuildGradle(config, (config) => {
+    if (config.modResults.language !== 'groovy') return config
+    const libsDir = path.join(path.dirname(require.resolve('@wwdrew/expo-spotify-sdk/package.json')), 'android', 'libs').replace(/\\/g, '/')
+    const needle = /allprojects\s*\{\s*repositories\s*\{/
+    if (!needle.test(config.modResults.contents)) {
+      throw new Error(
+        "withSpotifyAppRemoteFlatDir: couldn't find 'allprojects { repositories {' in the root build.gradle — " +
+          'the Expo/RN template may have changed; update this plugin.',
+      )
+    }
+    config.modResults.contents = config.modResults.contents.replace(
+      needle,
+      (match) => `${match}\n        flatDir {\n            dirs "${libsDir}"\n        }`,
+    )
+    return config
+  })
+}
+
 // Note: authenticateAsync() (spotify/auth.ts) takes no redirect URI
 // argument at all — the effective redirect URI is entirely determined by
 // this plugin's scheme/host at prebuild time, baked into the native
@@ -63,8 +130,17 @@ module.exports = {
           clientID: process.env.EXPO_PUBLIC_SPOTIFY_CLIENT_ID ?? '',
           scheme: 'listensync',
           host: 'spotify-auth',
+          // Passing redirectPathPattern here has no effect on Android as of
+          // v1.0.0 (real plugin bug, not a config mistake) — see
+          // withSpotifyRedirectPathPatternFix below, which is what actually
+          // fixes this.
         },
       ],
+      // Must run after the wwdrew plugin above — Expo applies plugin mods in
+      // array order, and this patches build.gradle content that plugin
+      // generates.
+      withSpotifyRedirectPathPatternFix,
+      withSpotifyAppRemoteFlatDir,
     ],
   },
 }
